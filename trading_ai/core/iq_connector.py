@@ -33,6 +33,59 @@ class IQOptionConnector:
 
     # ── Connection ─────────────────────────────────────────────────────────────
 
+    def connect_with_ssid(self, ssid: str) -> Tuple[bool, str]:
+        """
+        Connect using SSID session token (from browser cookies).
+        ข้ามขั้นตอน HTTP login ทั้งหมด — ไม่โดน rate limit.
+        """
+        try:
+            logger.info("Connecting via SSID token…")
+            self.api = IQ_Option(self.email or "user@example.com",
+                                 self.password or "placeholder")
+
+            # inject SSID ก่อน connect (iqoptionapi 7.x)
+            _injected = False
+            inner = getattr(self.api, 'api', None)
+            if inner is not None:
+                if hasattr(inner, 'token'):
+                    inner.token = ssid
+                    _injected = True
+                elif hasattr(inner, 'ssid'):
+                    inner.ssid = ssid
+                    _injected = True
+
+            if not _injected and hasattr(self.api, 'token'):
+                self.api.token = ssid
+                _injected = True
+
+            if _injected:
+                # เชื่อม WebSocket โดยตรง (ข้าม HTTP login)
+                for _attr in ('start_ws_connect', 'connect_ws', 'connect_websocket'):
+                    _fn = getattr(inner or self.api, _attr, None)
+                    if callable(_fn):
+                        _fn()
+                        break
+
+                for _ in range(10):
+                    time.sleep(1)
+                    try:
+                        if self.api.check_connect():
+                            self.api.change_balance(self.account_type)
+                            self._connected = self._ever_connected = True
+                            self._dead = self._in_2fa = False
+                            logger.info("Connected via SSID (%s)", self.account_type)
+                            return True, "ok"
+                    except Exception:
+                        pass
+
+            # fallback: ลอง connect ปกติ (SSID inject ไม่ work)
+            logger.warning("SSID inject ไม่ work — ลอง normal login…")
+            return self.connect()
+
+        except Exception as exc:
+            logger.error("SSID connect error: %s", exc)
+            return False, str(exc)
+
     def connect(self) -> Tuple[bool, str]:
         """
         Establish connection to IQ Option.

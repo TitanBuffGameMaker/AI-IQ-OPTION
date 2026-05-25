@@ -109,7 +109,38 @@ function handleMessage(msg) {
     case 'otp_required':
       showOTPModal(msg.message);
       break;
+
+    case 'ssid_required':
+      showSSIDModal(msg.message);
+      break;
   }
+}
+
+// ── SSID Modal ────────────────────────────────────────────────────────────────
+function showSSIDModal(message) {
+  const overlay = document.getElementById('ssid-overlay');
+  if (!overlay) return;
+  if (message) document.getElementById('ssid-msg').textContent = message;
+  document.getElementById('ssid-error').style.display = 'none';
+  document.getElementById('ssid-input').value = '';
+  overlay.style.display = 'flex';
+  setTimeout(() => document.getElementById('ssid-input').focus(), 100);
+}
+
+function openIQOptionLogin() {
+  window.open('https://iqoption.com/login', '_blank');
+}
+
+function submitSSID() {
+  const ssid = document.getElementById('ssid-input').value.trim();
+  if (!ssid || ssid.length < 10) {
+    document.getElementById('ssid-error').style.display = 'block';
+    document.getElementById('ssid-error').textContent = 'SSID ไม่ถูกต้อง กรุณาลองใหม่';
+    return;
+  }
+  send({ type: 'otp', code: ssid });   // reuse otp channel
+  document.getElementById('ssid-overlay').style.display = 'none';
+  setStatus('กำลังเชื่อมต่อด้วย SSID…', 'info');
 }
 
 // ── OTP Modal ─────────────────────────────────────────────────────────────────

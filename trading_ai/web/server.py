@@ -480,20 +480,37 @@ def _init_components():
     from trading_ai.core.iq_connector import IQOptionConnector
     _connector = IQOptionConnector(config.IQ_EMAIL, config.IQ_PASSWORD,
                                     config.IQ_ACCOUNT_TYPE)
-    connected, reason = _connector.connect()
+
+    # ── ลอง SSID ก่อน (ถ้ามี) ─────────────────────────────────────────────
+    if config.IQ_SSID:
+        broadcast_sync({"type":"status","message":"🔑 เชื่อมต่อด้วย SSID token…","level":"info"})
+        connected, reason = _connector.connect_with_ssid(config.IQ_SSID)
+    else:
+        connected, reason = _connector.connect()
 
     # ── 2FA / OTP flow ───────────────────────────────────────────────────────
     if not connected and str(reason).upper() == "2FA":
-        _connector._in_2fa = True   # ป้องกัน ensure_connected reconnect ซ้ำ
+        _connector._in_2fa = True
         broadcast_sync({"type": "otp_required", "message": "กรุณากรอก OTP 5 หลักจาก SMS/Email"})
         logger.info("Waiting for OTP from web UI…")
         _otp_event.clear()
-        _otp_event.wait(timeout=180)   # รอ OTP สูงสุด 3 นาที
+        _otp_event.wait(timeout=180)
         if _otp_code:
             connected = _connector.submit_otp(_otp_code)
         if not connected:
-            broadcast_sync({"type":"status","message":"❌ OTP ไม่ถูกต้อง หรือ iqoptionapi ไม่รองรับ 2FA — กรุณาปิด 2FA ใน IQ Option แล้วลองใหม่","level":"error"})
+            broadcast_sync({"type":"status","message":"❌ OTP ไม่ถูกต้อง — กรุณาปิด 2FA หรือใช้ SSID login","level":"error"})
             return
+
+    # ── SSID request จาก UI ──────────────────────────────────────────────────
+    if not connected and ("exceeded" in reason.lower() or "WinError" in reason or not config.IQ_SSID):
+        broadcast_sync({"type": "ssid_required",
+                        "message": "กรุณา login IQ Option ในเบราว์เซอร์แล้วก๊อปปี้ SSID"})
+        logger.info("Waiting for SSID from web UI…")
+        _otp_event.clear()
+        _otp_event.wait(timeout=300)
+        if _otp_code:   # reuse otp_event for SSID too
+            connected, reason = _connector.connect_with_ssid(_otp_code)
+            _otp_code = ""
 
     bal = _connector.get_balance() if connected else 0.0
     broadcast_sync({

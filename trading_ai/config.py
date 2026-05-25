@@ -12,6 +12,7 @@ class Config:
     IQ_EMAIL:        str   = os.getenv("IQ_EMAIL", "your@email.com")
     IQ_PASSWORD:     str   = os.getenv("IQ_PASSWORD", "yourpassword")
     IQ_ACCOUNT_TYPE: str   = os.getenv("IQ_ACCOUNT_TYPE", "PRACTICE")
+    IQ_SSID:         str   = os.getenv("IQ_SSID", "")   # session token (ข้าม login)
 
     # ── Trading parameters ─────────────────────────────────────────────────
     ASSET:            str   = os.getenv("ASSET", "EURUSD")

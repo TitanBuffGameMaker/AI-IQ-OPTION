@@ -56,6 +56,45 @@
 
 </nav>
 
+<!-- ════════════════════════ SSID MODAL ════════════════════════ -->
+<div id="ssid-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.82);z-index:10000;align-items:center;justify-content:center;">
+  <div style="background:#1a1a2e;border:1px solid #00c87a;border-radius:16px;padding:28px 32px;width:420px;box-shadow:0 8px 40px rgba(0,200,122,0.25);">
+    <div style="font-size:32px;text-align:center;margin-bottom:6px;">🌐</div>
+    <div style="font-size:17px;font-weight:700;color:#fff;text-align:center;margin-bottom:4px;">Login ผ่านเบราว์เซอร์</div>
+    <div style="font-size:12px;color:#9e8aff;text-align:center;margin-bottom:16px;" id="ssid-msg">กรุณา login IQ Option ในเบราว์เซอร์แล้วก๊อปปี้ SSID</div>
+
+    <!-- Step guide -->
+    <div style="background:#0d0d1a;border-radius:10px;padding:12px 14px;margin-bottom:14px;font-size:12px;color:#ccc;line-height:1.9;">
+      <b style="color:#00c87a;">วิธีหา SSID:</b><br>
+      1. กดปุ่มด้านล่าง → Login IQ Option<br>
+      2. กด <b>F12</b> → <b>Application</b> → <b>Cookies</b> → <b>https://iqoption.com</b><br>
+      3. หาแถว <b style="color:#ffd700;">ssid</b> → คลิก → ก๊อปปี้ค่าใน <b>Value</b><br>
+      4. วางในช่องด้านล่าง แล้วกด <b>เชื่อมต่อ</b>
+    </div>
+
+    <button onclick="openIQOptionLogin()"
+      style="width:100%;padding:10px;border-radius:10px;border:1px solid #00c87a;
+             background:transparent;color:#00c87a;font-size:14px;font-weight:600;
+             cursor:pointer;margin-bottom:12px;">
+      🔗 เปิด IQ Option Login
+    </button>
+
+    <input id="ssid-input" type="text" placeholder="วาง SSID ที่นี่…"
+      style="width:100%;padding:10px 12px;border-radius:10px;border:2px solid #00c87a;
+             background:#0d0d1a;color:#fff;font-size:13px;outline:none;
+             margin-bottom:10px;box-sizing:border-box;"
+      onkeydown="if(event.key==='Enter')submitSSID()">
+
+    <button onclick="submitSSID()"
+      style="width:100%;padding:11px;border-radius:10px;border:none;
+             background:linear-gradient(135deg,#00c87a,#2962ff);color:#fff;
+             font-size:15px;font-weight:700;cursor:pointer;">
+      เชื่อมต่อด้วย SSID
+    </button>
+    <div id="ssid-error" style="color:#f23645;font-size:12px;margin-top:8px;display:none;text-align:center;"></div>
+  </div>
+</div>
+
 <!-- ════════════════════════ OTP MODAL ═════════════════════════ -->
 <div id="otp-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.75);z-index:9999;display:none;align-items:center;justify-content:center;">
   <div style="background:#1a1a2e;border:1px solid #7c4dff;border-radius:16px;padding:32px 36px;width:320px;text-align:center;box-shadow:0 8px 40px rgba(124,77,255,0.3);">
