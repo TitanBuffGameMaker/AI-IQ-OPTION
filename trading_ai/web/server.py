@@ -413,10 +413,10 @@ OTC_ASSETS = ["EUR/USD (OTC)", "GBP/USD (OTC)", "AUD/USD (OTC)", "GBP/JPY (OTC)"
 # IQ Option API names for OTC assets – tries each in order until one works.
 # During weekends the platform uses OTC variants; weekdays may use regular names.
 OTC_ASSET_MAP: Dict[str, List[str]] = {
-    "EUR/USD (OTC)": ["EURUSD-OTC", "EURUSD_otc", "EURUSD"],
-    "GBP/USD (OTC)": ["GBPUSD-OTC", "GBPUSD_otc", "GBPUSD"],
-    "AUD/USD (OTC)": ["AUDUSD-OTC", "AUDUSD_otc", "AUDUSD"],
-    "GBP/JPY (OTC)": ["GBPJPY-OTC", "GBPJPY_otc", "GBPJPY"],
+    "EUR/USD (OTC)": ["EURUSD-OTC", "EURUSD_otc", "frxEURUSD", "EURUSD"],
+    "GBP/USD (OTC)": ["GBPUSD-OTC", "GBPUSD_otc", "frxGBPUSD", "GBPUSD"],
+    "AUD/USD (OTC)": ["AUDUSD-OTC", "AUDUSD_otc", "frxAUDUSD", "AUDUSD"],
+    "GBP/JPY (OTC)": ["GBPJPY-OTC", "GBPJPY_otc", "frxGBPJPY", "GBPJPY"],
 }
 
 # Cache: display_name → resolved api_name (once found, reuse)
@@ -471,7 +471,7 @@ def _fetch_initial_candles():
 
 def _init_components():
     """Called in a background thread after server starts."""
-    global _connector, _agent, _brain, _knowledge, _check_results
+    global _connector, _agent, _brain, _knowledge, _check_results, _otp_code
 
     time.sleep(1)  # wait for server to be ready
     broadcast_sync({"type":"status","message":"กำลังเชื่อมต่อ IQ Option…","level":"info"})
