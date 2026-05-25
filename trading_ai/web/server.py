@@ -173,13 +173,18 @@ async def websocket_endpoint(ws: WebSocket):
 async def _send_current_state(ws: WebSocket):
     """Push current system state to a newly connected client."""
     bal = _connector.get_balance() if _connector else 0.0
+    all_passed_cached = (
+        all(r["passed"] for r in _check_results) if _check_results else False
+    )
     await manager.send(ws, {
         "type": "init",
         "connected": _connector is not None,
+        "account": config.IQ_ACCOUNT_TYPE,
         "balance": bal,
         "ai_running": _ai_running,
         "stats": _trade_stats,
         "checks": _check_results,
+        "all_passed": all_passed_cached,
         "history": list(_trade_history)[-20:],
         "settings": {
             "timeframe": f"{config.CANDLE_TIMEFRAME // 60}m",
@@ -383,6 +388,8 @@ def _ai_loop():
 
         if not info.get("skipped", False):
             pnl = info.get("pnl", 0.0)
+            logger.info("Trade %s completed: pnl=%+.2f total_trades=%d",
+                        action_name, pnl, _trade_stats["trades"] + 1)
             _brain.learn(pnl, final_action, indicator_vec, ppo_action, next_obs=next_obs)
 
             _trade_stats["trades"] += 1

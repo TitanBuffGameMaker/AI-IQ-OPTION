@@ -240,18 +240,39 @@ class IQOptionConnector:
             logger.error("place_trade error: %s", exc)
             return False, None
 
-    def get_trade_result(self, order_id: int, timeout: int = 120) -> Optional[float]:
+    def get_trade_result(self, order_id: int, timeout: int = 90) -> Optional[float]:
+        """
+        Fetch trade outcome with a hard timeout.
+
+        iqoptionapi's check_win_v3 contains a `while True` busy-wait that blocks
+        forever when the result never arrives (OTC/weekend race conditions).
+        We run it in a daemon thread and abandon if it hasn't returned in time.
+        """
         if not self.ensure_connected():
             return None
+
+        import threading
+        holder: dict = {"value": None}
+
+        def _fetch():
+            try:
+                holder["value"] = self.api.check_win_v3(order_id)
+            except Exception as exc:
+                logger.debug("check_win_v3 error: %s", exc)
+
+        thread = threading.Thread(target=_fetch, daemon=True)
+        thread.start()
+        thread.join(timeout=timeout)
+
+        if thread.is_alive():
+            logger.warning("Trade %s result timeout (%ds) — abandoning", order_id, timeout)
+            return None
+
+        result = holder["value"]
         try:
-            result = self.api.check_win_v3(order_id)
-            deadline = time.time() + timeout
-            while result is None and time.time() < deadline:
-                time.sleep(1)
-                result = self.api.check_win_v3(order_id)
             return float(result) if result is not None else None
-        except Exception as exc:
-            logger.error("get_trade_result error: %s", exc)
+        except (TypeError, ValueError):
+            logger.warning("Trade %s returned non-numeric result: %r", order_id, result)
             return None
 
     def get_payout(self, asset: str) -> float:

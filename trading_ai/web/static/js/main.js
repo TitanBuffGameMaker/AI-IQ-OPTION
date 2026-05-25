@@ -236,9 +236,11 @@ function applyTraining(msg) {
 
 // ── Apply functions ───────────────────────────────────────────────────────────
 function applyInit(msg) {
-  applyConnection({ connected: msg.connected, balance: msg.balance, account: '' });
+  applyConnection({ connected: msg.connected, balance: msg.balance, account: msg.account || '' });
   updateStats(msg.stats || {});
-  if (msg.checks && msg.checks.length) applyChecks({ results: msg.checks });
+  if (msg.checks && msg.checks.length) {
+    applyChecks({ results: msg.checks, all_passed: !!msg.all_passed });
+  }
   const history = msg.history || [];
   if (history.length === 0) {
     const empty = document.getElementById('empty-history');
