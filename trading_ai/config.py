@@ -44,7 +44,7 @@ class Config:
     # ── Risk management (ULTRA) ────────────────────────────────────────────
     MAX_CONSECUTIVE_LOSSES: int   = 5
     DAILY_LOSS_LIMIT:       float = float(os.getenv("DAILY_LOSS_LIMIT", "20.0"))
-    MIN_CONFIDENCE:         float = 0.60
+    MIN_CONFIDENCE:         float = 0.42   # ลดจาก 0.60 — brain ใหม่ต้องเริ่มเทรดก่อนเพื่อเรียนรู้
     MAX_POSITION_SIZE:      float = 2.0   # USD สูงสุด
     SHARPE_WINDOW:          int   = 20    # window สำหรับคำนวณ Sharpe reward
 
