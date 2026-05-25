@@ -110,36 +110,81 @@ function handleMessage(msg) {
       showOTPModal(msg.message);
       break;
 
-    case 'ssid_required':
-      showSSIDModal(msg.message);
+    case 'ssid_required':        // legacy — redirect to new modal
+    case 'login_required':
+      showLoginModal(msg.reason || msg.message || '');
       break;
   }
 }
 
-// ── SSID Modal ────────────────────────────────────────────────────────────────
-function showSSIDModal(message) {
-  const overlay = document.getElementById('ssid-overlay');
+// ── Login Modal (Email/Password + SSID) ───────────────────────────────────────
+function showLoginModal(reason) {
+  const overlay = document.getElementById('login-overlay');
   if (!overlay) return;
-  if (message) document.getElementById('ssid-msg').textContent = message;
-  document.getElementById('ssid-error').style.display = 'none';
-  document.getElementById('ssid-input').value = '';
+  const reasonEl = document.getElementById('login-reason');
+  if (reasonEl && reason) {
+    // Show human-readable hint based on error content
+    if (reason.toLowerCase().includes('exceeded') || reason.toLowerCase().includes('number of requests')) {
+      reasonEl.textContent = '⏳ IQ Option บล็อก login ชั่วคราว — ลอง SSID Token แทน';
+    } else if (reason.toLowerCase().includes('10060') || reason.toLowerCase().includes('timed out')) {
+      reasonEl.textContent = '🌐 เชื่อมต่อเซิร์ฟเวอร์ไม่ได้ — ตรวจสอบ internet หรือลอง login ใหม่';
+    } else if (reason) {
+      reasonEl.textContent = reason.substring(0, 120);
+    }
+  }
+  document.getElementById('login-error').style.display = 'none';
+  showLoginTab('creds');   // default to email/password tab
   overlay.style.display = 'flex';
-  setTimeout(() => document.getElementById('ssid-input').focus(), 100);
+  setTimeout(() => document.getElementById('login-email').focus(), 150);
 }
 
-function openIQOptionLogin() {
-  window.open('https://iqoption.com/login', '_blank');
+function showLoginTab(tab) {
+  const isCreds = tab === 'creds';
+  document.getElementById('login-panel-creds').style.display = isCreds ? 'block' : 'none';
+  document.getElementById('login-panel-ssid').style.display  = isCreds ? 'none'  : 'block';
+
+  const btnC = document.getElementById('tab-btn-creds');
+  const btnS = document.getElementById('tab-btn-ssid');
+  if (isCreds) {
+    btnC.style.cssText += ';border:2px solid #2962ff;background:#2962ff22;color:#5c8fff;';
+    btnS.style.cssText += ';border:1px solid #444;background:transparent;color:#666;';
+    setTimeout(() => document.getElementById('login-email').focus(), 80);
+  } else {
+    btnS.style.cssText += ';border:2px solid #00c87a;background:#00c87a22;color:#00c87a;';
+    btnC.style.cssText += ';border:1px solid #444;background:transparent;color:#666;';
+    setTimeout(() => document.getElementById('ssid-input').focus(), 80);
+  }
+}
+
+function submitLoginCreds() {
+  const email    = (document.getElementById('login-email').value    || '').trim();
+  const password = (document.getElementById('login-password').value || '').trim();
+  const errEl    = document.getElementById('login-error');
+  if (!email || !email.includes('@')) {
+    errEl.textContent = 'กรุณากรอก Email ให้ถูกต้อง';
+    errEl.style.display = 'block';
+    return;
+  }
+  if (!password) {
+    errEl.textContent = 'กรุณากรอก Password';
+    errEl.style.display = 'block';
+    return;
+  }
+  send({ type: 'credentials', email, password });
+  document.getElementById('login-overlay').style.display = 'none';
+  setStatus('กำลังเชื่อมต่อ…', 'info');
 }
 
 function submitSSID() {
-  const ssid = document.getElementById('ssid-input').value.trim();
+  const ssid  = (document.getElementById('ssid-input').value || '').trim();
+  const errEl = document.getElementById('login-error');
   if (!ssid || ssid.length < 10) {
-    document.getElementById('ssid-error').style.display = 'block';
-    document.getElementById('ssid-error').textContent = 'SSID ไม่ถูกต้อง กรุณาลองใหม่';
+    errEl.textContent = 'SSID ไม่ถูกต้อง (ต้องยาวกว่า 10 ตัวอักษร)';
+    errEl.style.display = 'block';
     return;
   }
-  send({ type: 'otp', code: ssid });   // reuse otp channel
-  document.getElementById('ssid-overlay').style.display = 'none';
+  send({ type: 'otp', code: ssid });
+  document.getElementById('login-overlay').style.display = 'none';
   setStatus('กำลังเชื่อมต่อด้วย SSID…', 'info');
 }
 

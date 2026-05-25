@@ -54,8 +54,9 @@ _ai_running  = False
 _trade_stats = {"trades": 0, "wins": 0, "pnl": 0.0}
 _trade_history: deque = deque(maxlen=200)
 _check_results: List[Dict] = []
-_otp_event   = threading.Event()
-_otp_code:   str = ""
+_otp_event      = threading.Event()
+_otp_code:  str = ""
+_pending_creds: Dict[str, str] = {}   # {"email":..,"password":..} from UI login form
 
 # ── FastAPI app ───────────────────────────────────────────────────────────────
 app = FastAPI(title="IQ Option AI Trading Dashboard", docs_url=None)
@@ -217,6 +218,14 @@ async def _handle_client_message(ws: WebSocket, msg: Dict):
         global _otp_code
         _otp_code = str(msg.get("code", "")).strip()
         _otp_event.set()
+
+    elif mtype == "credentials":
+        global _pending_creds
+        _pending_creds = {
+            "email":    str(msg.get("email", "")).strip(),
+            "password": str(msg.get("password", "")).strip(),
+        }
+        _otp_event.set()   # wake the waiting _init_components thread
 
     elif mtype == "ping":
         await manager.send(ws, {"type": "pong"})
@@ -498,19 +507,37 @@ def _init_components():
         if _otp_code:
             connected = _connector.submit_otp(_otp_code)
         if not connected:
-            broadcast_sync({"type":"status","message":"❌ OTP ไม่ถูกต้อง — กรุณาปิด 2FA หรือใช้ SSID login","level":"error"})
-            return
+            broadcast_sync({"type":"status","message":"❌ OTP ไม่ถูกต้อง — กรุณาปิด 2FA แล้ว login ใหม่","level":"error"})
 
-    # ── SSID request จาก UI ──────────────────────────────────────────────────
-    if not connected and ("exceeded" in reason.lower() or "WinError" in reason or not config.IQ_SSID):
-        broadcast_sync({"type": "ssid_required",
-                        "message": "กรุณา login IQ Option ในเบราว์เซอร์แล้วก๊อปปี้ SSID"})
-        logger.info("Waiting for SSID from web UI…")
+    # ── Login UI loop — แสดง form email/password + SSID จนกว่าจะเชื่อมต่อสำเร็จ ──
+    while not connected:
+        broadcast_sync({
+            "type":    "login_required",
+            "reason":  str(reason),
+            "message": str(reason),
+        })
+        logger.info("Waiting for credentials or SSID from web UI…")
         _otp_event.clear()
-        _otp_event.wait(timeout=300)
-        if _otp_code:   # reuse otp_event for SSID too
+        _pending_creds.clear()
+        _otp_code = ""
+        _otp_event.wait(timeout=600)
+
+        if _pending_creds.get("email"):
+            # ผู้ใช้กรอก email/password ใน UI
+            _connector.email    = _pending_creds["email"]
+            _connector.password = _pending_creds["password"]
+            _connector._dead    = False   # reset dead flag เพื่อให้ connect ได้
+            _pending_creds.clear()
+            broadcast_sync({"type":"status","message":"กำลังเชื่อมต่อ…","level":"info"})
+            connected, reason = _connector.connect()
+        elif _otp_code:
+            # ผู้ใช้วาง SSID token
+            broadcast_sync({"type":"status","message":"กำลังเชื่อมต่อด้วย SSID…","level":"info"})
             connected, reason = _connector.connect_with_ssid(_otp_code)
             _otp_code = ""
+        else:
+            broadcast_sync({"type":"status","message":"หมดเวลา — กรุณารีสตาร์ทโปรแกรม","level":"error"})
+            return
 
     bal = _connector.get_balance() if connected else 0.0
     broadcast_sync({
@@ -519,17 +546,6 @@ def _init_components():
         "balance": bal,
         "account": config.IQ_ACCOUNT_TYPE,
     })
-
-    if not connected:
-        if "exceeded" in reason.lower() or "number of requests" in reason.lower():
-            broadcast_sync({"type":"status",
-                "message":"⏳ IQ Option rate limit — รอ 5 นาทีแล้วรีสตาร์ทโปรแกรมใหม่",
-                "level":"error"})
-        else:
-            broadcast_sync({"type":"status",
-                "message":f"❌ เชื่อมต่อไม่ได้ ({reason}) – ตรวจสอบ email/password ใน .env",
-                "level":"error"})
-        return
 
     # Startup checks
     broadcast_sync({"type":"status","message":"🔍 ตรวจสอบการตั้งค่า…","level":"info"})
