@@ -26,9 +26,10 @@ class IQOptionConnector:
         self.password     = password
         self.account_type = account_type
         self.api: Optional[IQ_Option] = None
-        self._connected   = False
-        self._in_2fa      = False   # True ระหว่างรอ OTP — ห้าม reconnect
-        self._dead        = False   # True เมื่อ connect ล้มเหลว — หยุด auto-retry
+        self._connected      = False
+        self._ever_connected = False   # True หลัง connect สำเร็จครั้งแรก
+        self._in_2fa         = False
+        self._dead           = False   # True เมื่อ connect ล้มเหลว ห้าม auto-retry
 
     # ── Connection ─────────────────────────────────────────────────────────────
 
@@ -65,14 +66,17 @@ class IQOptionConnector:
                     return False, reason_str
 
                 self.api.change_balance(self.account_type)
-                self._connected = True
-                self._in_2fa    = False
+                self._connected      = True
+                self._ever_connected = True
+                self._in_2fa         = False
+                self._dead           = False
                 logger.info("Connected to IQ Option (%s account)", self.account_type)
                 return True, "ok"
 
             except Exception as exc:
                 _last_connect_time = time.time()
                 logger.error("Connection error: %s", exc)
+                self._dead = True   # หยุด auto-retry
                 return False, str(exc)
 
     def submit_otp(self, otp: str) -> bool:
@@ -124,8 +128,11 @@ class IQOptionConnector:
             return False
 
     def ensure_connected(self) -> bool:
-        """Reconnect if session dropped. Skipped during 2FA or dead state."""
+        """Reconnect if session dropped. Only retries after a previous successful connection."""
         if self._in_2fa or self._dead:
+            return False
+        # ถ้ายังไม่เคย connect สำเร็จเลย ห้าม auto-retry (ต้องแก้ .env หรือรอ rate limit)
+        if not self._ever_connected:
             return False
         if not self._connected or not self.api:
             ok, _ = self.connect()
