@@ -61,7 +61,15 @@ _otp_code:  str = ""
 _pending_creds: Dict[str, str] = {}   # {"email":..,"password":..} from UI login form
 
 # ── FastAPI app ───────────────────────────────────────────────────────────────
-app = FastAPI(title="IQ Option AI Trading Dashboard", docs_url=None)
+@contextlib.asynccontextmanager
+async def _lifespan(application):
+    global _loop
+    _loop = asyncio.get_running_loop()
+    threading.Thread(target=_init_components, daemon=True).start()
+    yield
+
+
+app = FastAPI(title="IQ Option AI Trading Dashboard", docs_url=None, lifespan=_lifespan)
 
 _BASE = os.path.dirname(__file__)
 app.mount("/static", StaticFiles(directory=os.path.join(_BASE, "static")), name="static")
@@ -240,7 +248,41 @@ _loop: Optional[asyncio.AbstractEventLoop] = None
 def broadcast_sync(msg: Dict):
     """Thread-safe broadcast from non-async code."""
     if _loop and not _loop.is_closed():
-        asyncio.run_coroutine_threadsafe(manager.broadcast(msg), _loop)
+        coro = manager.broadcast(msg)
+        try:
+            asyncio.run_coroutine_threadsafe(coro, _loop)
+        except RuntimeError:
+            coro.close()  # event loop shutting down — discard cleanly
+
+
+def _save_trade_stats():
+    """Persist cumulative trade stats and history to disk."""
+    path = os.path.join(config.MODEL_DIR, "trade_stats.json")
+    os.makedirs(config.MODEL_DIR, exist_ok=True)
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"stats": _trade_stats, "history": list(_trade_history)},
+                      f, ensure_ascii=False)
+    except Exception:
+        pass
+
+
+def _load_trade_stats():
+    """Restore persisted trade stats from disk (called on startup)."""
+    path = os.path.join(config.MODEL_DIR, "trade_stats.json")
+    if not os.path.exists(path):
+        return
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        _trade_stats.update(data.get("stats", {}))
+        for entry in data.get("history", []):
+            _trade_history.append(entry)
+        logger.info("Trade stats restored: %d trades, win_rate=%.1f%%",
+                    _trade_stats["trades"],
+                    100 * _trade_stats["wins"] / max(_trade_stats["trades"], 1))
+    except Exception as exc:
+        logger.warning("Could not load trade stats: %s", exc)
 
 
 # ── Trading helpers ───────────────────────────────────────────────────────────
@@ -358,6 +400,7 @@ def _ai_loop():
                 "confidence": round(signal.confidence, 3),
             }
             _trade_history.append(entry)
+            _save_trade_stats()
 
             wr = _trade_stats["wins"] / max(_trade_stats["trades"], 1)
             broadcast_sync({
@@ -614,6 +657,9 @@ def _init_components():
     _knowledge.load_brain(_agent)
     _brain     = BrainCore(asset=config.ASSET, base_dir=config.MODEL_DIR)
 
+    # Restore cumulative trade history from disk
+    _load_trade_stats()
+
     brain_status = _brain.get_status(ppo_agent=_agent)
     broadcast_sync({"type":"brain", **brain_status})
     broadcast_sync({"type":"status","message":"✅ พร้อมแล้ว – กด START AI","level":"success"})
@@ -721,13 +767,6 @@ def _price_loop():
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
-@app.on_event("startup")
-async def on_startup():
-    global _loop
-    _loop = asyncio.get_running_loop()
-    threading.Thread(target=_init_components, daemon=True).start()
-
-
 def start_server(host: str = "0.0.0.0", port: int = 8000):
     setup_logging(log_dir=config.LOG_DIR)
     logger.info("Starting web dashboard at http://%s:%d", host, port)
