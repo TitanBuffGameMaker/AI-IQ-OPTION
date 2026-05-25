@@ -399,6 +399,64 @@ body {
   vertical-align: middle; display: none;
 }
 
+/* ── Trade history sections (active + closed) ─────────────────────────── */
+.trade-section { margin-bottom: 14px; }
+.trade-section-header {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 11px; font-weight: 700; color: var(--text-muted);
+  padding: 6px 0 8px; border-bottom: 1px solid var(--border); margin-bottom: 6px;
+  text-transform: uppercase; letter-spacing: 0.4px;
+}
+.trade-section-header .dot {
+  width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0;
+}
+.trade-section-header .dot.live {
+  background: #22c55e;
+  box-shadow: 0 0 6px #22c55e;
+  animation: pulse-live 1.4s ease-in-out infinite;
+}
+.trade-section-header .dot.closed { background: #6b7280; }
+@keyframes pulse-live {
+  0%,100% { opacity: 1;   transform: scale(1); }
+  50%     { opacity: 0.4; transform: scale(0.85); }
+}
+.trade-count {
+  margin-left: auto; background: var(--card); color: var(--text);
+  border-radius: 10px; padding: 1px 8px; font-size: 10px; font-weight: 700;
+}
+.empty-msg {
+  text-align: center; color: var(--text-muted); padding: 12px;
+  font-size: 11px; font-style: italic;
+}
+
+/* ── Active order card (with live countdown) ──────────────────────────── */
+.active-order {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 8px; align-items: center;
+  background: var(--card); border-left: 3px solid var(--blue);
+  border-radius: 6px; padding: 8px 10px; margin-bottom: 6px;
+  transition: border-color .2s;
+}
+.active-order.buy  { border-left-color: #22c55e; }
+.active-order.sell { border-left-color: #ef4444; }
+.active-order.expired { border-left-color: #f59e0b; opacity: 0.85; }
+.active-order .ao-time   { font-size: 10px; color: var(--text-muted); font-family: 'Consolas', monospace; }
+.active-order .ao-main   { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.active-order .ao-asset  { font-size: 12px; font-weight: 700; color: var(--text); }
+.active-order .ao-info   { font-size: 10px; color: var(--text-muted); display: flex; gap: 6px; }
+.active-order .ao-action.buy  { color: #22c55e; font-weight: 700; }
+.active-order .ao-action.sell { color: #ef4444; font-weight: 700; }
+.active-order .ao-countdown {
+  text-align: right;
+  font-family: 'Consolas', monospace; font-size: 13px; font-weight: 700;
+  color: var(--blue); min-width: 48px;
+}
+.active-order.expired .ao-countdown { color: #f59e0b; }
+.active-order .ao-countdown .ao-cd-sub {
+  display: block; font-size: 9px; font-weight: 500; color: var(--text-muted); margin-top: 1px;
+}
+
 /* Brain stats */
 .brain-stat {
   display: flex;

@@ -362,10 +362,29 @@
 
       <!-- Trade history panel -->
       <div id="tab-history" class="tab-panel">
-        <div id="trade-list"></div>
-        <div id="empty-history" style="text-align:center;color:var(--text-muted);padding:24px;font-size:12px;">
-          ยังไม่มีประวัติการเทรด
+
+        <!-- ── Active (open) orders ── -->
+        <div class="trade-section">
+          <div class="trade-section-header">
+            <span class="dot live"></span>
+            <span>ออเดอร์ที่เปิดอยู่</span>
+            <span class="trade-count" id="active-count">0</span>
+          </div>
+          <div id="active-list"></div>
+          <div id="empty-active" class="empty-msg">— ไม่มีออเดอร์ที่เปิด —</div>
         </div>
+
+        <!-- ── Closed orders ── -->
+        <div class="trade-section">
+          <div class="trade-section-header">
+            <span class="dot closed"></span>
+            <span>ออเดอร์ที่ปิดแล้ว</span>
+            <span class="trade-count" id="closed-count">0</span>
+          </div>
+          <div id="trade-list"></div>
+          <div id="empty-history" class="empty-msg">ยังไม่มีประวัติการเทรด</div>
+        </div>
+
       </div>
 
       <!-- Settings panel -->

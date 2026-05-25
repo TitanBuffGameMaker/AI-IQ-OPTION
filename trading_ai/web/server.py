@@ -55,6 +55,7 @@ _env         = None
 _ai_running  = False
 _trade_stats = {"trades": 0, "wins": 0, "pnl": 0.0}
 _trade_history: deque = deque(maxlen=200)
+_open_orders: Dict[int, Dict] = {}   # order_id → {asset, action, amount, expiry_ts, open_time, manual}
 _check_results: List[Dict] = []
 _otp_event      = threading.Event()
 _otp_code:  str = ""
@@ -99,6 +100,37 @@ class _WsBroadcastHandler(logging.Handler):
             pass
         finally:
             _log_broadcasting = False
+
+
+# ── Open-orders tracking ──────────────────────────────────────────────────────
+def _register_open_order(order_id: int, asset_display: str, action: str,
+                        amount: float, duration_min: int, manual: bool = False) -> None:
+    """Add a freshly-placed trade to the open-orders book and notify the UI."""
+    if order_id is None:
+        return
+    now = time.time()
+    entry = {
+        "order_id":  int(order_id),
+        "asset":     asset_display,
+        "action":    action.upper(),
+        "amount":    float(amount),
+        "open_time": time.strftime("%H:%M:%S", time.localtime(now)),
+        "open_ts":   now,
+        "expiry_ts": now + duration_min * 60,
+        "duration":  duration_min,
+        "manual":    manual,
+    }
+    _open_orders[int(order_id)] = entry
+    broadcast_sync({"type": "open_trade", "entry": entry})
+
+
+def _close_open_order(order_id: int) -> None:
+    """Remove a finished trade from the open-orders book and notify the UI."""
+    if order_id is None:
+        return
+    if int(order_id) in _open_orders:
+        _open_orders.pop(int(order_id), None)
+    broadcast_sync({"type": "close_trade", "order_id": int(order_id)})
 
 
 def _install_ws_log_handler() -> None:
@@ -235,6 +267,7 @@ async def _send_current_state(ws: WebSocket):
         "checks": _check_results,
         "all_passed": all_passed_cached,
         "history": list(_trade_history)[-20:],
+        "open_orders": list(_open_orders.values()),
         "settings": {
             "timeframe": f"{config.CANDLE_TIMEFRAME // 60}m",
             "duration": f"{config.TRADE_DURATION}m",
@@ -363,17 +396,75 @@ async def _execute_manual_trade(asset: str, direction: str):
         duration_minutes=config.TRADE_DURATION,
     )
     if ok:
+        _register_open_order(oid, asset, direction, config.TRADE_AMOUNT,
+                             config.TRADE_DURATION, manual=True)
         broadcast_sync({
             "type": "status",
             "message": f"✅ Trade placed: {direction.upper()} {asset}",
             "level": "success",
         })
+        # Background-await the result so manual trades also close cleanly
+        threading.Thread(
+            target=_await_manual_trade_result,
+            args=(oid, asset, direction),
+            daemon=True,
+        ).start()
     else:
         broadcast_sync({
             "type": "status",
             "message": f"❌ Trade rejected: {asset}",
             "level": "error",
         })
+
+
+def _await_manual_trade_result(order_id: int, asset_display: str, direction: str) -> None:
+    """Wait for a manual trade to settle, then update stats + UI."""
+    global _trade_stats
+    try:
+        balance_before = _connector.get_balance()
+        time.sleep(config.TRADE_DURATION * 60 + 5)
+        pnl = _connector.get_trade_result(order_id, timeout=30,
+                                          balance_before=balance_before)
+        _close_open_order(order_id)
+        if pnl is None:
+            broadcast_sync({"type": "status",
+                            "message": f"⚠️ Manual trade {asset_display}: ผลลัพธ์ไม่ทราบ",
+                            "level": "warn"})
+            return
+        _trade_stats["trades"] += 1
+        if pnl > 0:
+            _trade_stats["wins"] += 1
+        _trade_stats["pnl"] += pnl
+        bal = _connector.get_balance()
+        entry = {
+            "time":       time.strftime("%H:%M:%S"),
+            "asset":      asset_display,
+            "action":     direction.upper(),
+            "pnl":        round(pnl, 2),
+            "win":        pnl > 0,
+            "balance":    bal,
+            "confidence": 1.0,   # manual
+            "order_id":   int(order_id),
+        }
+        _trade_history.append(entry)
+        _save_trade_stats()
+        wr = _trade_stats["wins"] / max(_trade_stats["trades"], 1)
+        broadcast_sync({
+            "type":      "trade",
+            "order_id":  int(order_id),
+            "asset":     asset_display,
+            "action":    direction.upper(),
+            "pnl":       round(pnl, 2),
+            "balance":   bal,
+            "trades":    _trade_stats["trades"],
+            "wins":      _trade_stats["wins"],
+            "win_rate":  round(wr, 3),
+            "total_pnl": round(_trade_stats["pnl"], 2),
+            "entry":     entry,
+        })
+    except Exception as exc:
+        logger.error("manual trade result error: %s", exc)
+        _close_open_order(order_id)
 
 
 async def _start_ai():
@@ -428,6 +519,16 @@ def _ai_loop():
     from trading_ai.core.trading_env import TradingEnv, N_INDICATORS
     if _env is None:
         _env = TradingEnv(_connector)
+        # Map API asset → display name so the open-orders panel shows readable labels
+        def _on_placed(order_id, api_asset, direction, amount, duration_min):
+            display = next(
+                (d for d, a in _resolved_asset_names.items() if a == api_asset),
+                api_asset,
+            )
+            _register_open_order(order_id, display, direction, amount,
+                                 duration_min, manual=False)
+        _env.on_trade_placed = _on_placed
+        _env.on_trade_closed = _close_open_order
 
     obs, _ = _env.reset()
 
@@ -447,8 +548,9 @@ def _ai_loop():
             except Exception as exc:
                 logger.debug("Observation failed for %s: %s", display_name, exc)
                 continue
-            # Let WS buffer flush before next asset request (shared-state race)
-            time.sleep(0.8)
+            # Let the WS buffer flush before the next asset (shared-state race
+            # with the _price_loop thread) — 1.5s matches the resolve loop.
+            time.sleep(1.5)
             indicator_vec = asset_obs[:N_INDICATORS]
             ppo_action, log_prob, value = _agent.select_action(asset_obs)
             _, ppo_conf = _agent.get_confidence(asset_obs)

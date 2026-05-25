@@ -94,6 +94,14 @@ function handleMessage(msg) {
       applyTrade(msg);
       break;
 
+    case 'open_trade':
+      if (msg.entry) addActiveOrder(msg.entry);
+      break;
+
+    case 'close_trade':
+      if (msg.order_id != null) removeActiveOrder(msg.order_id);
+      break;
+
     case 'stats_update':
       updateStats(msg.stats || {});
       if (msg.history && msg.history.length) {
@@ -260,6 +268,8 @@ function applyInit(msg) {
   } else {
     history.forEach(addTradeToHistory);
   }
+  // Replay any orders that were already open when this client connected
+  (msg.open_orders || []).forEach(addActiveOrder);
   applySettings(msg.settings || {});
   setAiState(msg.ai_running || false);
 }
@@ -543,7 +553,96 @@ function addTradeToHistory(entry) {
 
   // Keep max 50 items
   while (list.children.length > 50) list.removeChild(list.lastChild);
+  updateClosedCount();
 }
+
+function updateClosedCount() {
+  const list  = document.getElementById('trade-list');
+  const count = document.getElementById('closed-count');
+  if (count && list) count.textContent = list.children.length;
+}
+
+// ── Active orders (open positions with live countdown) ────────────────────────
+const _activeOrders = new Map();   // order_id → {entry, el}
+
+function addActiveOrder(entry) {
+  if (!entry || entry.order_id == null) return;
+  const list = document.getElementById('active-list');
+  const oid  = entry.order_id;
+  if (_activeOrders.has(oid)) return;   // already shown
+
+  const action = (entry.action || '').toUpperCase();
+  const cls    = action === 'BUY' || action === 'CALL' ? 'buy'  :
+                 action === 'SELL'|| action === 'PUT'  ? 'sell' : '';
+  const arrow  = cls === 'buy' ? '▲' : cls === 'sell' ? '▼' : '•';
+  const tag    = entry.manual ? '🖐 Manual' : '🤖 AI';
+
+  const el = document.createElement('div');
+  el.className   = `active-order ${cls}`;
+  el.dataset.oid = String(oid);
+  el.innerHTML = `
+    <span class="ao-time">${entry.open_time || '--:--'}</span>
+    <span class="ao-main">
+      <span class="ao-asset">${(entry.asset || '').replace(' (OTC)', '')} <span class="ao-action ${cls}">${arrow} ${action}</span></span>
+      <span class="ao-info">$${(entry.amount ?? 0).toFixed(2)} · ${tag}</span>
+    </span>
+    <span class="ao-countdown" data-expiry="${entry.expiry_ts || 0}">
+      <span class="ao-cd-main">--:--</span>
+      <span class="ao-cd-sub">เหลือ</span>
+    </span>
+  `;
+  list.insertBefore(el, list.firstChild);
+  _activeOrders.set(oid, { entry, el });
+
+  const empty = document.getElementById('empty-active');
+  if (empty) empty.style.display = 'none';
+  updateActiveCount();
+  tickCountdown(el);  // first paint immediately
+}
+
+function removeActiveOrder(oid) {
+  if (oid == null) return;
+  const rec = _activeOrders.get(oid);
+  if (!rec) return;
+  rec.el.remove();
+  _activeOrders.delete(oid);
+  if (_activeOrders.size === 0) {
+    const empty = document.getElementById('empty-active');
+    if (empty) empty.style.display = '';
+  }
+  updateActiveCount();
+}
+
+function updateActiveCount() {
+  const c = document.getElementById('active-count');
+  if (c) c.textContent = _activeOrders.size;
+}
+
+function tickCountdown(el) {
+  const cd   = el.querySelector('.ao-countdown');
+  if (!cd) return;
+  const exp  = parseFloat(cd.dataset.expiry) || 0;
+  const left = Math.floor(exp - Date.now() / 1000);
+  const main = cd.querySelector('.ao-cd-main');
+  const sub  = cd.querySelector('.ao-cd-sub');
+  if (left > 0) {
+    const m = Math.floor(left / 60), s = left % 60;
+    main.textContent = `${m.toString().padStart(2,'0')}:${s.toString().padStart(2,'0')}`;
+    sub.textContent  = 'เหลือ';
+    el.classList.remove('expired');
+  } else {
+    main.textContent = '⏳';
+    sub.textContent  = 'กำลังรอผล…';
+    el.classList.add('expired');
+  }
+}
+
+// One global tick loop for all active orders
+setInterval(() => {
+  _activeOrders.forEach(rec => tickCountdown(rec.el));
+}, 1000);
+
+
 
 // ── Settings ──────────────────────────────────────────────────────────────────
 function applySettings(s) {

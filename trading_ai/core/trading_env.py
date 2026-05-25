@@ -57,6 +57,14 @@ class TradingEnv(gym.Env):
         # overridden per cycle (multi-asset trading in the AI loop).
         self._current_asset: str = config.ASSET
 
+        # Optional callback fired right after place_trade succeeds.
+        # Signature: fn(order_id, asset, direction, amount, duration_min)
+        # Server uses this to register the trade in the live open-orders book.
+        self.on_trade_placed = None
+        # Optional callback fired when the trade result comes back.
+        # Signature: fn(order_id)
+        self.on_trade_closed = None
+
         self._balance_start:      float = 0.0
         self._consecutive_losses: int   = 0
         self._daily_pnl:          float = 0.0
@@ -157,6 +165,15 @@ class TradingEnv(gym.Env):
         if not success or order_id is None:
             return self.HOLD_PENALTY, {"action": direction, "pnl": 0.0, "skipped": True}
 
+        # Notify any external listener (server.py adds to its open-orders book
+        # so the dashboard can show a live countdown).
+        if self.on_trade_placed:
+            try:
+                self.on_trade_placed(order_id, asset, direction, config.TRADE_AMOUNT,
+                                     config.TRADE_DURATION)
+            except Exception as exc:
+                logger.debug("on_trade_placed hook error: %s", exc)
+
         wait_seconds = config.TRADE_DURATION * 60 + 5
         logger.info("Trade %s placed on %s — waiting %ds for expiry…", order_id, asset, wait_seconds)
         time.sleep(wait_seconds)
@@ -165,6 +182,11 @@ class TradingEnv(gym.Env):
         pnl_result = self.connector.get_trade_result(
             order_id, timeout=30, balance_before=balance_before
         )
+        if self.on_trade_closed:
+            try:
+                self.on_trade_closed(order_id)
+            except Exception as exc:
+                logger.debug("on_trade_closed hook error: %s", exc)
         if pnl_result is None:
             logger.warning("Trade %s: result unavailable — not counted (skipped)", order_id)
             return 0.0, {"action": direction, "pnl": 0.0, "skipped": True}
