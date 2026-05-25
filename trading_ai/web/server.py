@@ -657,8 +657,13 @@ def _init_components():
     _knowledge.load_brain(_agent)
     _brain     = BrainCore(asset=config.ASSET, base_dir=config.MODEL_DIR)
 
-    # Restore cumulative trade history from disk
+    # Restore cumulative trade history from disk and push to any connected client
     _load_trade_stats()
+    broadcast_sync({
+        "type":    "stats_update",
+        "stats":   _trade_stats,
+        "history": list(_trade_history)[-20:],
+    })
 
     brain_status = _brain.get_status(ppo_agent=_agent)
     broadcast_sync({"type":"brain", **brain_status})

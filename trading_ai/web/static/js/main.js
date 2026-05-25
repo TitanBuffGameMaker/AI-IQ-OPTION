@@ -94,6 +94,16 @@ function handleMessage(msg) {
       applyTrade(msg);
       break;
 
+    case 'stats_update':
+      updateStats(msg.stats || {});
+      if (msg.history && msg.history.length) {
+        document.getElementById('trade-list').innerHTML = '';
+        const empty = document.getElementById('empty-history');
+        if (empty) empty.style.display = 'none';
+        msg.history.forEach(addTradeToHistory);
+      }
+      break;
+
     case 'status':
       setStatus(msg.message, msg.level || 'info');
       break;
@@ -229,7 +239,13 @@ function applyInit(msg) {
   applyConnection({ connected: msg.connected, balance: msg.balance, account: '' });
   updateStats(msg.stats || {});
   if (msg.checks && msg.checks.length) applyChecks({ results: msg.checks });
-  (msg.history || []).forEach(addTradeToHistory);
+  const history = msg.history || [];
+  if (history.length === 0) {
+    const empty = document.getElementById('empty-history');
+    if (empty) empty.style.display = '';
+  } else {
+    history.forEach(addTradeToHistory);
+  }
   applySettings(msg.settings || {});
   setAiState(msg.ai_running || false);
 }
@@ -497,7 +513,9 @@ function updateStats(s) {
 
 // ── Trade history ─────────────────────────────────────────────────────────────
 function addTradeToHistory(entry) {
-  const list = document.getElementById('trade-list');
+  const list  = document.getElementById('trade-list');
+  const empty = document.getElementById('empty-history');
+  if (empty) empty.style.display = 'none';
   const item = document.createElement('div');
   item.className = `trade-item ${entry.win ? 'win' : 'loss'}`;
   const sign = entry.pnl >= 0 ? '+' : '';
