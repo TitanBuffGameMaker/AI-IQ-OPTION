@@ -24,6 +24,8 @@ WebSocket message protocol (JSON):
     {type:"settings",timeframe, duration, amount}
 """
 import asyncio
+import contextlib
+import io
 import json
 import logging
 import os
@@ -433,7 +435,7 @@ PRICE_RANGES: Dict[str, tuple] = {
     "EUR/USD (OTC)": (0.90, 1.45),
     "GBP/USD (OTC)": (1.10, 1.75),
     "AUD/USD (OTC)": (0.50, 0.90),
-    "EUR/JPY (OTC)": (130.0, 175.0),
+    "EUR/JPY (OTC)": (130.0, 200.0),   # EUR/JPY is ~184 in 2025-2026
 }
 
 # Cache: display_name → resolved api_name (once found, reuse)
@@ -441,6 +443,14 @@ _resolved_asset_names: Dict[str, str] = {}
 
 # Cache: display_name → list of {time,open,high,low,close} for chart history
 _candle_history: Dict[str, List[Dict]] = {a: [] for a in OTC_ASSETS}
+
+
+@contextlib.contextmanager
+def _suppress_iqapi_stdout():
+    """Redirect stdout so iqoptionapi's direct print() calls don't pollute the console."""
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        yield
 
 
 def _resolve_asset_name(display_name: str) -> Optional[str]:
@@ -460,7 +470,8 @@ def _resolve_asset_name(display_name: str) -> Optional[str]:
 
     for api_name in OTC_ASSET_MAP.get(display_name, []):
         try:
-            df = _connector.get_candles(asset=api_name, timeframe_seconds=60, count=5)
+            with _suppress_iqapi_stdout():
+                df = _connector.get_candles(asset=api_name, timeframe_seconds=60, count=5)
             time.sleep(1.5)   # let WS buffer flush before next request
             if df is None or len(df) == 0:
                 continue
