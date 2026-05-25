@@ -595,10 +595,6 @@ def _init_components():
     _, ocr_results = checker.run_all_checks()
 
     results = []
-    results.append({"name":"กรอบเวลาแท่งเทียน = 30m","passed":True,
-                    "message":"ตั้ง timeframe เป็น 30m ในทุกกราฟ"})
-    results.append({"name":"ระยะเวลาออเดอร์ = 1m","passed":True,
-                    "message":"ตั้ง expiry เป็น 1 นาที"})
     for r in api_results + ocr_results:
         results.append({"name":r.name,"passed":r.passed,"message":r.message})
 
@@ -626,6 +622,26 @@ def _init_components():
     broadcast_sync({"type":"status","message":"📊 โหลดประวัติกราฟ OTC…","level":"info"})
     _fetch_initial_candles()
     broadcast_sync({"type":"candle_history","data":_candle_history})
+
+    # Update checks with live asset resolution results
+    live_results = list(_check_results)
+    for display_name in OTC_ASSETS:
+        api_name = _resolved_asset_names.get(display_name)
+        if api_name:
+            live_results.append({
+                "name": f"เชื่อมต่อ {display_name}",
+                "passed": True,
+                "message": f"→ {api_name}",
+            })
+        else:
+            live_results.append({
+                "name": f"เชื่อมต่อ {display_name}",
+                "passed": False,
+                "message": "ไม่พบ asset นี้ใน IQ Option — ลองใหม่อีกครั้ง",
+            })
+    _check_results = live_results
+    all_passed_live = all(r["passed"] for r in live_results)
+    broadcast_sync({"type":"check","results":live_results,"all_passed":all_passed_live})
 
     # Start price update loop
     threading.Thread(target=_price_loop, daemon=True).start()
