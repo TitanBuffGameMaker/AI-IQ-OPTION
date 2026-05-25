@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>IQ Option AI Trading</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet">
+  <!-- TradingView Lightweight Charts (free, MIT) -->
+  <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+
+<!-- ════════════════════════ TOP NAVBAR ════════════════════════ -->
+<nav id="navbar">
+
+  <div class="logo">
+    <div class="logo-dot"></div>
+    IQ Option AI
+  </div>
+
+  <!-- Connection status -->
+  <div class="nav-badge">
+    <div class="dot gold" id="conn-dot"></div>
+    <span id="conn-text">กำลังเชื่อมต่อ…</span>
+  </div>
+
+  <!-- Balance -->
+  <div class="nav-badge" id="balance-badge">
+    💰 <span id="balance-val">$0.00</span>
+  </div>
+
+  <!-- Brain status -->
+  <div class="nav-badge">
+    <span id="brain-badge">🧠 0 nodes</span>
+  </div>
+
+  <!-- Brain Age -->
+  <div id="brain-age-badge">
+    <span id="nav-age-emoji">👶</span>
+    <span id="nav-age-val">0</span>
+    <span style="font-weight:400;color:#9e8aff;font-size:10px;">ปี</span>
+    <span id="nav-age-stage" style="font-size:10px;color:#9e8aff;">ทารก</span>
+  </div>
+
+  <div class="spacer"></div>
+
+  <!-- Settings display -->
+  <div class="nav-settings">
+    <span id="settings-badge">TF: ─── | DUR: ───</span>
+  </div>
+
+  <!-- AI start/stop button -->
+  <button id="btn-ai" onclick="toggleAI()">▶  START AI</button>
+
+</nav>
+
+<!-- ════════════════════════ CHECK BANNER ══════════════════════ -->
+<div id="check-banner">
+  <span id="banner-text">🔍 กำลังตรวจสอบการตั้งค่า IQ Option…</span>
+  <div id="check-pills" style="display:flex;gap:6px;flex-wrap:wrap;"></div>
+</div>
+
+<!-- ════════════════════════ MAIN AREA ═════════════════════════ -->
+<div id="main">
+
+  <!-- ─── 4-Chart Grid ──────────────────────────────────────── -->
+  <div id="chart-grid">
+
+    {% set assets = [
+      'EUR/USD (OTC)',
+      'GBP/USD (OTC)',
+      'AUD/USD (OTC)',
+      'GBP/JPY (OTC)'
+    ] %}
+
+    {% for asset in assets %}
+    <div class="chart-card" data-asset="{{ asset }}">
+
+      <!-- Header -->
+      <div class="card-header">
+        <span class="otc-badge">OTC</span>
+        <span class="asset-name">{{ asset.replace(' (OTC)', '') }}</span>
+        <span class="signal-tag">── HOLD</span>
+      </div>
+
+      <!-- Price -->
+      <div class="price-row">
+        <span class="price-val" data-prev="0">─.─────</span>
+        <span class="price-change">+0.000%</span>
+      </div>
+
+      <!-- Lightweight Chart -->
+      <div class="chart-container"></div>
+
+      <!-- Confidence bar -->
+      <div class="confidence-row">
+        <span class="conf-label">AI confidence</span>
+        <div class="conf-track">
+          <div class="conf-fill" style="width:0%"></div>
+        </div>
+        <span class="conf-pct">0%</span>
+      </div>
+
+      <!-- BUY / SELL buttons -->
+      <div class="btn-row">
+        <button class="btn-trade btn-buy" disabled
+                onclick="manualTrade('{{ asset }}', 'call')">
+          <span class="arrow">▲</span> BUY  ขึ้น
+        </button>
+        <button class="btn-trade btn-sell" disabled
+                onclick="manualTrade('{{ asset }}', 'put')">
+          <span class="arrow">▼</span> SELL  ลง
+        </button>
+      </div>
+
+    </div>
+    {% endfor %}
+
+  </div><!-- /#chart-grid -->
+
+  <!-- ─── Right Sidebar ─────────────────────────────────────── -->
+  <aside id="sidebar">
+
+    <div class="sidebar-tabs">
+      <div class="sidebar-tab active" data-tab="brain" onclick="switchTab('brain')">🧠 Brain</div>
+      <div class="sidebar-tab" data-tab="history"      onclick="switchTab('history')">📋 History</div>
+      <div class="sidebar-tab" data-tab="settings"     onclick="switchTab('settings')">⚙️ Settings</div>
+    </div>
+
+    <div class="sidebar-content">
+
+      <!-- Brain panel -->
+      <div id="tab-brain" class="tab-panel active">
+
+        <!-- ── Brain Age Card ── -->
+        <div class="brain-age-card">
+          <div class="brain-age-header">
+            <div class="brain-age-emoji" id="age-emoji">👶</div>
+            <div class="brain-age-info">
+              <div>
+                <span class="brain-age-num" id="age-num">0</span>
+                <span class="brain-age-unit"> ปี</span>
+              </div>
+              <div class="brain-age-stage" id="age-stage">ทารก – เพิ่งเกิด</div>
+            </div>
+          </div>
+
+          <!-- Timeline 0 → 80+ ปี -->
+          <div class="age-timeline">
+            <div class="age-track">
+              <div class="age-fill" id="age-fill" style="width:0%"></div>
+            </div>
+            <div class="age-labels">
+              <span>เกิด</span><span>10</span><span>20</span>
+              <span>30</span><span>45</span><span>60</span><span>80+</span>
+            </div>
+          </div>
+
+          <!-- Stage pills -->
+          <div class="stage-row">
+            <span class="stage-pill" data-stage="ทารก">👶 ทารก</span>
+            <span class="stage-pill" data-stage="เด็กเล็ก">🧒 เด็กเล็ก</span>
+            <span class="stage-pill" data-stage="วัยรุ่น">🧑 วัยรุ่น</span>
+            <span class="stage-pill" data-stage="หนุ่มสาว">👨 หนุ่มสาว</span>
+            <span class="stage-pill" data-stage="มืออาชีพ">👨‍💼 มืออาชีพ</span>
+            <span class="stage-pill" data-stage="ผู้เชี่ยวชาญ">🧓 ผู้เชี่ยวชาญ</span>
+            <span class="stage-pill" data-stage="ปรมาจารย์">👴 ปรมาจารย์</span>
+            <span class="stage-pill" data-stage="ตำนาน">🏆 ตำนาน</span>
+          </div>
+
+          <!-- Breakdown -->
+          <div class="breakdown-section">
+            <div class="breakdown-label">คะแนนแต่ละด้าน (รวม <span id="score-total">0</span>/100)</div>
+            <div class="breakdown-row">
+              <span class="breakdown-name">🌳 ความรู้</span>
+              <div class="breakdown-track"><div class="breakdown-fill" id="bd-knowledge" style="width:0%;background:#7c4dff"></div></div>
+              <span class="breakdown-val" id="bv-knowledge">0</span>
+            </div>
+            <div class="breakdown-row">
+              <span class="breakdown-name">🎯 ผลงาน</span>
+              <div class="breakdown-track"><div class="breakdown-fill" id="bd-performance" style="width:0%;background:#00c87a"></div></div>
+              <span class="breakdown-val" id="bv-performance">0</span>
+            </div>
+            <div class="breakdown-row">
+              <span class="breakdown-name">📚 ประสบการณ์</span>
+              <div class="breakdown-track"><div class="breakdown-fill" id="bd-experience" style="width:0%;background:#2962ff"></div></div>
+              <span class="breakdown-val" id="bv-experience">0</span>
+            </div>
+            <div class="breakdown-row">
+              <span class="breakdown-name">🧬 การเรียนรู้</span>
+              <div class="breakdown-track"><div class="breakdown-fill" id="bd-learning" style="width:0%;background:#ffc107"></div></div>
+              <span class="breakdown-val" id="bv-learning">0</span>
+            </div>
+            <div class="breakdown-row">
+              <span class="breakdown-name">🎲 ความมั่นใจ</span>
+              <div class="breakdown-track"><div class="breakdown-fill" id="bd-confidence" style="width:0%;background:#f23645"></div></div>
+              <span class="breakdown-val" id="bv-confidence">0</span>
+            </div>
+          </div>
+
+          <!-- Next milestone -->
+          <div class="next-milestone" id="age-next">
+            ยังไม่มีข้อมูล – เชื่อมต่อ IQ Option เพื่อเริ่มการเรียนรู้
+          </div>
+        </div>
+
+        <!-- ── Raw Stats ── -->
+        <div class="brain-stat">
+          <span class="brain-stat-label">Knowledge nodes (รากไม้)</span>
+          <span class="brain-stat-val" id="brain-nodes">0</span>
+        </div>
+        <div class="brain-stat">
+          <span class="brain-stat-label">Branches (เส้นเชื่อม)</span>
+          <span class="brain-stat-val" id="brain-branches">0</span>
+        </div>
+        <div class="brain-stat">
+          <span class="brain-stat-label">Avg confidence</span>
+          <span class="brain-stat-val" id="brain-conf">0%</span>
+        </div>
+        <div class="brain-stat">
+          <span class="brain-stat-label">Recent win rate</span>
+          <span class="brain-stat-val" id="brain-wr">0%</span>
+        </div>
+        <div class="brain-stat">
+          <span class="brain-stat-label">Episodic memories</span>
+          <span class="brain-stat-val" id="brain-episodes">0</span>
+        </div>
+
+        <div style="margin-top:10px;font-size:11px;color:var(--text-muted);margin-bottom:6px;">
+          ประเภทความรู้
+        </div>
+        <div class="brain-type-row" id="brain-types"></div>
+        <div style="margin-top:12px;padding:10px;background:var(--card);
+                    border-radius:8px;font-size:10px;color:var(--text-muted);line-height:1.6;">
+          🌱 ยิ่งเทรดมาก รากความรู้ยิ่งขยาย<br>
+          🌐 สมองค้นข่าวอินเทอร์เน็ตทุก 30 นาที<br>
+          📅 ตรวจ economic calendar อัตโนมัติ
+        </div>
+
+      </div>
+
+      <!-- Trade history panel -->
+      <div id="tab-history" class="tab-panel">
+        <div id="trade-list"></div>
+        <div id="empty-history" style="text-align:center;color:var(--text-muted);padding:24px;font-size:12px;">
+          ยังไม่มีประวัติการเทรด
+        </div>
+      </div>
+
+      <!-- Settings panel -->
+      <div id="tab-settings" class="tab-panel">
+
+        <div class="form-group">
+          <label class="form-label">กรอบเวลาแท่งเทียน (Timeframe)</label>
+          <select id="set-tf" class="form-control form-select">
+            <option value="1m">1 นาที</option>
+            <option value="5m">5 นาที</option>
+            <option value="15m">15 นาที</option>
+            <option value="30m" selected>30 นาที ✅ (แนะนำ)</option>
+            <option value="1h">1 ชั่วโมง</option>
+          </select>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">ระยะเวลาออเดอร์ (Duration)</label>
+          <select id="set-dur" class="form-control form-select">
+            <option value="1m" selected>1 นาที ✅ (แนะนำ)</option>
+            <option value="2m">2 นาที</option>
+            <option value="3m">3 นาที</option>
+            <option value="5m">5 นาที</option>
+          </select>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">จำนวนเงินต่อไม้ (USD)</label>
+          <input id="set-amount" type="number" class="form-control"
+                 value="1" min="1" max="1000" step="1">
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">บัญชี</label>
+          <select id="set-account" class="form-control form-select">
+            <option value="PRACTICE">PRACTICE (ทดสอบ) ✅</option>
+            <option value="REAL">REAL (เงินจริง) ⚠️</option>
+          </select>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">Min. confidence ก่อนเทรด (%)</label>
+          <input id="set-conf" type="number" class="form-control"
+                 value="60" min="50" max="95" step="5">
+        </div>
+
+        <button class="btn-save" onclick="saveSettings()">💾 บันทึกการตั้งค่า</button>
+
+        <div style="margin-top:16px;padding:10px;background:var(--card);
+                    border-radius:8px;font-size:10px;color:var(--text-muted);line-height:1.7;">
+          ⚠️ เปลี่ยน PRACTICE → REAL เฉพาะตอน AI พิสูจน์แล้วว่า win rate &gt; 60%<br>
+          🔴 ตั้ง Daily loss limit ใน .env ก่อนใช้เงินจริง
+        </div>
+
+      </div>
+
+    </div><!-- /.sidebar-content -->
+  </aside>
+
+</div><!-- /#main -->
+
+<!-- ════════════════════════ STATUS BAR ════════════════════════ -->
+<div id="statusbar">
+  <span id="status-msg">กำลังเชื่อมต่อ…</span>
+  <div class="stat-chip">trades: <span class="stat-val" id="stat-trades">0</span></div>
+  <div class="stat-chip">win rate: <span class="stat-val" id="stat-wr">0%</span></div>
+  <div class="stat-chip">P&L: <span class="stat-val" id="stat-pnl">$0.00</span></div>
+</div>
+
+<!-- ════════════════ TRAINING METRICS BAR (ULTRA) ══════════════ -->
+<div id="training-bar" style="background:#0d0d0d;border-top:1px solid #1e1e2e;
+     padding:4px 12px;font-size:10px;display:flex;gap:8px;flex-wrap:wrap;
+     align-items:center;color:#555;">
+  <span style="color:#7c4dff;font-weight:600;">🧬 AI ULTRA Training:</span>
+  <div id="training-metrics" style="display:flex;gap:6px;flex-wrap:wrap;"></div>
+</div>
+
+<!-- ════════════════════════ CHECKS MODAL ══════════════════════ -->
+<div class="modal-overlay" id="modal" onclick="if(event.target===this)closeModal()">
+  <div class="modal">
+    <div class="modal-head">🔍 ผลการตรวจสอบการตั้งค่า IQ Option</div>
+    <div class="modal-body" id="modal-body"></div>
+    <div class="modal-foot">
+      <button class="btn-close-modal" onclick="closeModal()">ตกลง</button>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════════════════ TOAST ═════════════════════════════ -->
+<div id="toast-container"></div>
+
+<script src="/static/js/charts.js"></script>
+<script src="/static/js/main.js"></script>
+</body>
+</html>

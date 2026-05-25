@@ -1,0 +1,206 @@
+"""
+Trading Environment — ULTRA EDITION
+
+สิ่งที่ปรับปรุง:
+  - OBS_SIZE = 40 indicators + 256 chart features = 296
+  - Sharpe Ratio reward shaping
+  - Risk-adjusted reward function
+  - Better observation normalization
+  - Anti-overtrading penalty
+  - Drawdown penalty
+"""
+import logging
+import time
+from collections import deque
+from typing import Optional, Tuple
+
+import numpy as np
+import gymnasium as gym
+from gymnasium import spaces
+
+from trading_ai.config import config
+from trading_ai.core.iq_connector import IQOptionConnector
+from trading_ai.indicators.technical import IndicatorEngine, N_FEATURES
+from trading_ai.utils.chart_capture import ChartCapture
+
+logger = logging.getLogger(__name__)
+
+N_INDICATORS    = N_FEATURES   # 40 indicators
+N_CHART_FEATURES = 256          # CNN features
+OBS_SIZE        = N_INDICATORS + N_CHART_FEATURES   # 296
+
+
+class TradingEnv(gym.Env):
+    """
+    Gymnasium trading environment พร้อม ULTRA reward shaping:
+    - Sharpe ratio reward (รางวัลสำหรับ risk-adjusted return)
+    - Anti-overtrading penalty
+    - Drawdown protection
+    """
+
+    metadata = {"render_modes": []}
+    ACTIONS  = {0: "hold", 1: "call", 2: "put"}
+    HOLD_PENALTY = -0.02
+
+    def __init__(self, connector: IQOptionConnector):
+        super().__init__()
+        self.connector       = connector
+        self.indicator_engine = IndicatorEngine()
+        self.chart_capture   = ChartCapture(img_size=config.CHART_IMG_SIZE)
+
+        self.action_space = spaces.Discrete(3)
+        self.observation_space = spaces.Box(
+            low=-1.0, high=1.0, shape=(OBS_SIZE,), dtype=np.float32
+        )
+
+        self._balance_start:      float = 0.0
+        self._consecutive_losses: int   = 0
+        self._daily_pnl:          float = 0.0
+        self._episode_pnl:        float = 0.0
+        self._last_obs:           Optional[np.ndarray] = None
+
+        # สำหรับ Sharpe reward
+        self._reward_history: deque = deque(maxlen=config.SHARPE_WINDOW)
+        # สำหรับ anti-overtrading
+        self._recent_trades:  deque = deque(maxlen=10)
+        # สำหรับ drawdown protection
+        self._peak_balance:   float = 0.0
+        self._trade_count_episode: int = 0
+
+    # ── Gym API ─────────────────────────────────────────────────────────────
+
+    def reset(self, *, seed=None, options=None):
+        super().reset(seed=seed)
+        self._balance_start      = self.connector.get_balance()
+        self._peak_balance       = self._balance_start
+        self._episode_pnl        = 0.0
+        self._consecutive_losses = 0
+        self._trade_count_episode = 0
+        self._reward_history.clear()
+        obs = self._get_observation()
+        self._last_obs = obs
+        return obs, {}
+
+    def step(self, action: int) -> Tuple[np.ndarray, float, bool, bool, dict]:
+        action_name = self.ACTIONS[action]
+        reward      = 0.0
+        info        = {"action": action_name, "pnl": 0.0, "skipped": False}
+        terminated  = False
+
+        if action == 0:
+            reward = self.HOLD_PENALTY
+            info["skipped"] = True
+        else:
+            if not self.connector.is_market_open(config.ASSET):
+                reward = self.HOLD_PENALTY
+                info["skipped"] = True
+            else:
+                # Anti-overtrading: ถ้าเทรดบ่อยเกินไปใน 10 steps → penalty
+                trade_rate = sum(self._recent_trades) / max(len(self._recent_trades), 1)
+                if trade_rate > 0.8:
+                    reward = -0.05
+                    info["skipped"] = True
+                    logger.debug("Anti-overtrading: trade rate too high (%.1f%%)", trade_rate * 100)
+                else:
+                    reward, info = self._execute_trade(action_name)
+                    self._trade_count_episode += 1
+
+        self._recent_trades.append(1 if not info.get("skipped") else 0)
+
+        # Circuit breakers
+        if self._daily_pnl <= -config.DAILY_LOSS_LIMIT:
+            logger.warning("Daily loss limit hit")
+            terminated = True
+        if self._consecutive_losses >= config.MAX_CONSECUTIVE_LOSSES:
+            logger.warning("Too many consecutive losses")
+            terminated = True
+
+        # Drawdown protection
+        current_bal = self._balance_start + self._episode_pnl
+        if current_bal > self._peak_balance:
+            self._peak_balance = current_bal
+        drawdown = (self._peak_balance - current_bal) / (self._peak_balance + 1e-9)
+        if drawdown > 0.2:  # >20% drawdown จาก peak
+            logger.warning("Max drawdown reached: %.1f%%", drawdown * 100)
+            terminated = True
+
+        obs = self._get_observation()
+        self._last_obs = obs
+        return obs, reward, terminated, False, info
+
+    def render(self):
+        pass
+
+    # ── Internal helpers ─────────────────────────────────────────────────────
+
+    def _execute_trade(self, direction: str) -> Tuple[float, dict]:
+        success, order_id = self.connector.place_trade(
+            asset=config.ASSET,
+            direction=direction,
+            amount=config.TRADE_AMOUNT,
+            duration_minutes=config.TRADE_DURATION,
+        )
+        if not success or order_id is None:
+            return self.HOLD_PENALTY, {"action": direction, "pnl": 0.0, "skipped": True}
+
+        wait_seconds = config.TRADE_DURATION * 60 + 5
+        logger.info("Waiting %ds for trade to expire …", wait_seconds)
+        time.sleep(wait_seconds)
+
+        pnl = self.connector.get_trade_result(order_id) or 0.0
+        self._episode_pnl += pnl
+        self._daily_pnl   += pnl
+
+        if pnl < 0:
+            self._consecutive_losses += 1
+        else:
+            self._consecutive_losses = 0
+
+        # ULTRA Reward Shaping:
+        # 1. Base reward: normalized PnL
+        base_reward = pnl / (config.TRADE_AMOUNT + 1e-9)
+
+        # 2. Sharpe bonus: เพิ่มรางวัลถ้า reward สม่ำเสมอ
+        self._reward_history.append(base_reward)
+        sharpe_bonus = 0.0
+        if len(self._reward_history) >= 5:
+            r_arr  = np.array(self._reward_history)
+            sharpe = float(r_arr.mean()) / (float(r_arr.std()) + 1e-9)
+            sharpe_bonus = np.clip(sharpe * 0.1, -0.2, 0.2)
+
+        # 3. Consistency bonus
+        if pnl > 0 and self._consecutive_losses == 0 and self._trade_count_episode > 3:
+            consistency = 0.05
+        else:
+            consistency = 0.0
+
+        reward = base_reward + sharpe_bonus + consistency
+
+        logger.info(
+            "Trade %s: PnL=%.2f base=%.3f sharpe_bonus=%.3f total_reward=%.3f",
+            direction, pnl, base_reward, sharpe_bonus, reward,
+        )
+        return reward, {"action": direction, "pnl": pnl, "skipped": False}
+
+    def _get_observation(self) -> np.ndarray:
+        df = self.connector.get_candles(
+            asset=config.ASSET,
+            timeframe_seconds=config.CANDLE_TIMEFRAME,
+            count=config.LOOKBACK_CANDLES + 10,
+        )
+        if df is not None and len(df) >= 60:
+            ind_vec = self.indicator_engine.compute(df)
+        else:
+            ind_vec = None
+
+        if ind_vec is None or len(ind_vec) != N_INDICATORS:
+            ind_vec = np.zeros(N_INDICATORS, dtype=np.float32)
+        ind_vec = ind_vec[:N_INDICATORS]
+
+        chart_vec = self.chart_capture.get_features()
+        if chart_vec is None or len(chart_vec) != N_CHART_FEATURES:
+            chart_vec = np.zeros(N_CHART_FEATURES, dtype=np.float32)
+
+        obs = np.concatenate([ind_vec, chart_vec]).astype(np.float32)
+        obs = np.clip(obs, -1.0, 1.0)
+        return obs
