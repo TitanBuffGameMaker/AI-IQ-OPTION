@@ -2,6 +2,7 @@
 IQ Option API connector.
 Wraps iqoptionapi to provide clean methods for the trading agent.
 """
+import sys
 import time
 import logging
 import threading
@@ -16,6 +17,37 @@ _connect_lock = threading.Lock()
 _last_connect_time: float = 0.0
 _MIN_CONNECT_INTERVAL = 10.0   # วินาที — ห้าม connect ถี่กว่านี้
 _RATE_LIMIT_WAIT     = 310.0   # วินาที — รอ 5 นาที + buffer เมื่อถูก rate limit
+
+
+# ── Silence iqoptionapi internal noise ────────────────────────────────────────
+# iqoptionapi 7.x raises KeyError('underlying') from __get_digital_open whenever
+# the digital-options payload is incomplete (very common at session start and
+# on weekends).  It's harmless but spams the console — swallow it via a
+# threading.excepthook so other exceptions still surface.
+_prev_excepthook = threading.excepthook
+
+def _filter_iqapi_thread_errors(args: "threading.ExceptHookArgs") -> None:
+    exc, val, tb, thread = args.exc_type, args.exc_value, args.exc_traceback, args.thread
+    name = getattr(thread, "name", "")
+    if exc is KeyError and "underlying" in str(val) and "digital" in name.lower():
+        return
+    if exc is KeyError and "underlying" in str(val):
+        # Match by traceback function name as a fallback
+        frame = tb
+        while frame is not None:
+            if "__get_digital_open" in (frame.tb_frame.f_code.co_name or ""):
+                return
+            frame = frame.tb_next
+    _prev_excepthook(args)
+
+threading.excepthook = _filter_iqapi_thread_errors
+
+# Also silence noisy "logging" output from iqoptionapi's internal modules
+for _noisy in (
+    "iqoptionapi", "iqoptionapi.api", "iqoptionapi.stable_api",
+    "iqoptionapi.ws.client", "iqoptionapi.ws.chanels.candles",
+):
+    logging.getLogger(_noisy).setLevel(logging.WARNING)
 
 
 class IQOptionConnector:
@@ -240,18 +272,28 @@ class IQOptionConnector:
             logger.error("place_trade error: %s", exc)
             return False, None
 
-    def get_trade_result(self, order_id: int, timeout: int = 90) -> Optional[float]:
+    def get_trade_result(
+        self,
+        order_id: int,
+        timeout: int = 30,
+        balance_before: Optional[float] = None,
+    ) -> Optional[float]:
         """
-        Fetch trade outcome with a hard timeout.
+        Fetch trade outcome with a hard timeout, plus a balance-delta fallback.
 
         iqoptionapi's check_win_v3 contains a `while True` busy-wait that blocks
-        forever when the result never arrives (OTC/weekend race conditions).
-        We run it in a daemon thread and abandon if it hasn't returned in time.
+        forever when the result never arrives (very common for OTC binaries on
+        weekends).  We:
+          1. Run check_win_v3 in a daemon thread with a hard timeout.
+          2. If it returns numerically, use that.
+          3. Otherwise, if `balance_before` is provided, compute the PnL from
+             the current balance minus the pre-trade balance — this is the
+             most reliable way to score OTC trades when the official API is
+             silent.
         """
         if not self.ensure_connected():
             return None
 
-        import threading
         holder: dict = {"value": None}
 
         def _fetch():
@@ -260,33 +302,75 @@ class IQOptionConnector:
             except Exception as exc:
                 logger.debug("check_win_v3 error: %s", exc)
 
-        thread = threading.Thread(target=_fetch, daemon=True)
+        thread = threading.Thread(target=_fetch, daemon=True, name=f"check_win_{order_id}")
         thread.start()
         thread.join(timeout=timeout)
 
-        if thread.is_alive():
-            logger.warning("Trade %s result timeout (%ds) — abandoning", order_id, timeout)
-            return None
+        if not thread.is_alive():
+            result = holder["value"]
+            try:
+                if result is not None:
+                    return float(result)
+            except (TypeError, ValueError):
+                logger.debug("Trade %s non-numeric result: %r", order_id, result)
+        else:
+            logger.info("Trade %s: check_win_v3 timeout (%ds) — using balance delta",
+                        order_id, timeout)
 
-        result = holder["value"]
-        try:
-            return float(result) if result is not None else None
-        except (TypeError, ValueError):
-            logger.warning("Trade %s returned non-numeric result: %r", order_id, result)
-            return None
+        # Fallback: balance delta
+        if balance_before is not None:
+            time.sleep(2.0)   # let server-side balance settle
+            try:
+                balance_after = float(self.api.get_balance())
+                delta = balance_after - balance_before
+                if abs(delta) >= 0.01:
+                    logger.info("Trade %s: PnL from balance delta = %+.2f", order_id, delta)
+                    return delta
+                logger.warning("Trade %s: balance unchanged (delta=%.4f) — likely tied/refund",
+                               order_id, delta)
+                return 0.0   # tie/refund counts as 0, not a loss
+            except Exception as exc:
+                logger.warning("Trade %s: balance-delta fetch failed: %s", order_id, exc)
+
+        return None
 
     def get_payout(self, asset: str) -> float:
+        """
+        Return payout % for an asset.  Tries turbo/binary/digital buckets;
+        falls back to 80% for OTC assets (typical IQ Option OTC payout).
+        """
         if not self.ensure_connected():
-            return 0.0
+            return 80.0 if "OTC" in asset.upper() else 0.0
         try:
             all_profit = self.api.get_all_profit()
             if asset in all_profit:
-                return float(all_profit[asset].get("turbo", {}).get("profit", 0)) * 100
+                for bucket in ("turbo", "binary", "digital"):
+                    val = all_profit[asset].get(bucket)
+                    if isinstance(val, dict):
+                        p = val.get("profit", 0)
+                    else:
+                        p = val
+                    try:
+                        p = float(p or 0)
+                    except (TypeError, ValueError):
+                        p = 0.0
+                    if p > 0:
+                        return p * 100
+            if "OTC" in asset.upper():
+                return 80.0
             return 0.0
         except Exception:
-            return 0.0
+            return 80.0 if "OTC" in asset.upper() else 0.0
 
     def is_market_open(self, asset: str) -> bool:
+        """
+        Check if an asset is currently tradeable.
+
+        OTC assets are always open on IQ Option (24/7, including weekends).
+        For non-OTC assets, query the standard open-time table.
+        """
+        if "OTC" in asset.upper():
+            return True
         if not self.ensure_connected():
             return False
         try:

@@ -357,39 +357,98 @@ def _ai_loop():
     obs, _ = _env.reset()
 
     while _ai_running:
-        indicator_vec = obs[:N_INDICATORS]
+        # ── MULTI-ASSET SCAN ────────────────────────────────────────────────
+        # Compute a signal for every resolved OTC asset and pick the best
+        # opportunity (highest confidence non-HOLD signal).  Falls back to
+        # config.ASSET if nothing else is available.
+        candidates = []   # list of (display_name, api_name, signal, obs, ppo_action)
+        for display_name in OTC_ASSETS:
+            api_name = _resolved_asset_names.get(display_name)
+            if not api_name:
+                continue
+            _env.set_asset(api_name)
+            try:
+                asset_obs = _env._get_observation()
+            except Exception as exc:
+                logger.debug("Observation failed for %s: %s", display_name, exc)
+                continue
+            # Let WS buffer flush before next asset request (shared-state race)
+            time.sleep(0.8)
+            indicator_vec = asset_obs[:N_INDICATORS]
+            ppo_action, log_prob, value = _agent.select_action(asset_obs)
+            _, ppo_conf = _agent.get_confidence(asset_obs)
+            signal = _brain.think(indicator_vec, ppo_action, ppo_conf)
 
-        ppo_action, log_prob, value = _agent.select_action(obs)
-        _, ppo_conf = _agent.get_confidence(obs)
-        signal = _brain.think(indicator_vec, ppo_action, ppo_conf)
+            # Adjust final action through brain's risk multiplier + confidence gate
+            final_action = ppo_action
+            if signal.risk_multiplier < 0.2:
+                final_action = 0
+            elif signal.action != ppo_action and signal.confidence > ppo_conf + 0.15:
+                final_action = signal.action
 
-        final_action = ppo_action
-        if signal.risk_multiplier < 0.2:
-            final_action = 0
-        elif signal.action != ppo_action and signal.confidence > ppo_conf + 0.15:
-            final_action = signal.action
-        if signal.confidence < config.MIN_CONFIDENCE and final_action != 0:
-            final_action = 0
-
-        action_name = {0:"HOLD",1:"BUY",2:"SELL"}[final_action]
-
-        # Broadcast signal to all charts
-        for asset in OTC_ASSETS:
+            candidates.append({
+                "display":   display_name,
+                "api":       api_name,
+                "signal":    signal,
+                "obs":       asset_obs,
+                "ind":       indicator_vec,
+                "ppo":       ppo_action,
+                "log_prob":  log_prob,
+                "value":     value,
+                "final":     final_action,
+            })
             broadcast_sync({
-                "type": "signal",
-                "asset": asset,
-                "action": action_name,
+                "type":       "signal",
+                "asset":      display_name,
+                "action":     {0:"HOLD",1:"BUY",2:"SELL"}[final_action],
                 "confidence": round(signal.confidence, 3),
-                "risk": round(signal.risk_multiplier, 2),
-                "reasoning": signal.reasoning[:3],
+                "risk":       round(signal.risk_multiplier, 2),
+                "reasoning":  signal.reasoning[:3],
             })
 
+        if not candidates:
+            time.sleep(3)
+            continue
+
+        # Dynamic min-confidence: ใหม่ๆ ต้องเริ่มเทรดเพื่อเรียนรู้ → ใช้ 0.30
+        # หลังเทรดครบ 50 ไม้แล้วค่อยขึ้น 0.50
+        confirmed = _trade_stats.get("trades", 0)
+        if confirmed < 20:
+            min_conf = 0.30
+        elif confirmed < 50:
+            min_conf = 0.40
+        else:
+            min_conf = max(0.50, config.MIN_CONFIDENCE)
+
+        # Pick best non-HOLD signal across all assets
+        tradeable = [c for c in candidates
+                     if c["final"] != 0 and c["signal"].confidence >= min_conf]
+        if tradeable:
+            tradeable.sort(key=lambda c: c["signal"].confidence, reverse=True)
+            best = tradeable[0]
+        else:
+            # Nothing meets confidence — HOLD on the strongest-looking asset
+            best = max(candidates, key=lambda c: c["signal"].confidence)
+            best = {**best, "final": 0}
+
+        display_name  = best["display"]
+        api_name      = best["api"]
+        signal        = best["signal"]
+        indicator_vec = best["ind"]
+        ppo_action    = best["ppo"]
+        log_prob      = best["log_prob"]
+        value         = best["value"]
+        final_action  = best["final"]
+        action_name   = {0:"HOLD",1:"BUY",2:"SELL"}[final_action]
+        obs           = best["obs"]
+
+        _env.set_asset(api_name)
         next_obs, reward, terminated, truncated, info = _env.step(final_action)
 
         if not info.get("skipped", False):
             pnl = info.get("pnl", 0.0)
-            logger.info("Trade %s completed: pnl=%+.2f total_trades=%d",
-                        action_name, pnl, _trade_stats["trades"] + 1)
+            logger.info("Trade %s on %s completed: pnl=%+.2f total_trades=%d",
+                        action_name, display_name, pnl, _trade_stats["trades"] + 1)
             _brain.learn(pnl, final_action, indicator_vec, ppo_action, next_obs=next_obs)
 
             _trade_stats["trades"] += 1
@@ -399,7 +458,7 @@ def _ai_loop():
 
             entry = {
                 "time": time.strftime("%H:%M:%S"),
-                "asset": config.ASSET,
+                "asset": display_name,
                 "action": action_name,
                 "pnl": round(pnl, 2),
                 "win": pnl > 0,
@@ -412,7 +471,7 @@ def _ai_loop():
             wr = _trade_stats["wins"] / max(_trade_stats["trades"], 1)
             broadcast_sync({
                 "type": "trade",
-                "asset": config.ASSET,
+                "asset": display_name,
                 "action": action_name,
                 "pnl": round(pnl, 2),
                 "balance": entry["balance"],
