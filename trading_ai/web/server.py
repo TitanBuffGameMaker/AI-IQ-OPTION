@@ -484,14 +484,15 @@ def _init_components():
 
     # ── 2FA / OTP flow ───────────────────────────────────────────────────────
     if not connected and str(reason).upper() == "2FA":
+        _connector._in_2fa = True   # ป้องกัน ensure_connected reconnect ซ้ำ
         broadcast_sync({"type": "otp_required", "message": "กรุณากรอก OTP 5 หลักจาก SMS/Email"})
         logger.info("Waiting for OTP from web UI…")
         _otp_event.clear()
-        _otp_event.wait(timeout=120)   # รอ OTP สูงสุด 2 นาที
+        _otp_event.wait(timeout=180)   # รอ OTP สูงสุด 3 นาที
         if _otp_code:
             connected = _connector.submit_otp(_otp_code)
         if not connected:
-            broadcast_sync({"type":"status","message":"❌ OTP ไม่ถูกต้อง – รีสตาร์ทแล้วลองใหม่","level":"error"})
+            broadcast_sync({"type":"status","message":"❌ OTP ไม่ถูกต้อง หรือ iqoptionapi ไม่รองรับ 2FA — กรุณาปิด 2FA ใน IQ Option แล้วลองใหม่","level":"error"})
             return
 
     bal = _connector.get_balance() if connected else 0.0

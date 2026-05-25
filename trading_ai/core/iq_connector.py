@@ -4,70 +4,134 @@ Wraps iqoptionapi to provide clean methods for the trading agent.
 """
 import time
 import logging
+import threading
 import pandas as pd
 from typing import Optional, Tuple
 from iqoptionapi.stable_api import IQ_Option
 
 logger = logging.getLogger(__name__)
 
+# ── ป้องกันการ connect พร้อมกันหลาย thread ────────────────────────────────────
+_connect_lock = threading.Lock()
+_last_connect_time: float = 0.0
+_MIN_CONNECT_INTERVAL = 10.0   # วินาที — ห้าม connect ถี่กว่านี้
+_RATE_LIMIT_WAIT     = 310.0   # วินาที — รอ 5 นาที + buffer เมื่อถูก rate limit
+
 
 class IQOptionConnector:
     """Manages connection and trading operations with IQ Option."""
 
     def __init__(self, email: str, password: str, account_type: str = "PRACTICE"):
-        self.email = email
-        self.password = password
-        self.account_type = account_type  # "PRACTICE" or "REAL"
+        self.email        = email
+        self.password     = password
+        self.account_type = account_type
         self.api: Optional[IQ_Option] = None
-        self._connected = False
+        self._connected   = False
+        self._in_2fa      = False   # True ระหว่างรอ OTP — ห้าม reconnect
+
+    # ── Connection ─────────────────────────────────────────────────────────────
 
     def connect(self) -> Tuple[bool, str]:
         """
         Establish connection to IQ Option.
-        Returns (True, "ok") on success, (False, "2FA") when OTP needed,
-        or (False, reason) on other failures.
+        Returns (True, "ok") | (False, "2FA") | (False, reason).
+        Enforces minimum interval between attempts to avoid rate limiting.
         """
-        try:
-            self.api = IQ_Option(self.email, self.password)
-            check, reason = self.api.connect()
-            if not check:
-                logger.error("IQ Option connection failed: %s", reason)
-                return False, str(reason)
+        global _last_connect_time
 
-            self.api.change_balance(self.account_type)
-            self._connected = True
-            logger.info("Connected to IQ Option (%s account)", self.account_type)
-            return True, "ok"
-        except Exception as exc:
-            logger.error("Connection error: %s", exc)
-            return False, str(exc)
+        with _connect_lock:
+            # rate-limit guard
+            elapsed = time.time() - _last_connect_time
+            if elapsed < _MIN_CONNECT_INTERVAL:
+                wait = _MIN_CONNECT_INTERVAL - elapsed
+                logger.info("Connection cooldown — waiting %.1fs", wait)
+                time.sleep(wait)
+
+            try:
+                self.api = IQ_Option(self.email, self.password)
+                check, reason = self.api.connect()
+                _last_connect_time = time.time()
+
+                if not check:
+                    reason_str = str(reason)
+                    logger.error("IQ Option connection failed: %s", reason_str)
+
+                    # Rate limit — รอ 5 นาที
+                    if "number of requests" in reason_str.lower() or "exceeded" in reason_str.lower():
+                        logger.warning("Rate limited by IQ Option — waiting 5 minutes…")
+                        time.sleep(_RATE_LIMIT_WAIT)
+
+                    return False, reason_str
+
+                self.api.change_balance(self.account_type)
+                self._connected = True
+                self._in_2fa    = False
+                logger.info("Connected to IQ Option (%s account)", self.account_type)
+                return True, "ok"
+
+            except Exception as exc:
+                _last_connect_time = time.time()
+                logger.error("Connection error: %s", exc)
+                return False, str(exc)
 
     def submit_otp(self, otp: str) -> bool:
-        """Submit 5-digit OTP for 2FA login. Call after connect() returns (False, '2FA')."""
+        """Submit 5-digit OTP for 2FA. Call after connect() returns (False, '2FA')."""
         try:
-            self.api.send_sms_code(otp)
-            # รอให้ server ยืนยัน OTP โดยไม่ connect() ซ้ำ (จะส่ง SMS ซ้ำ)
-            for _ in range(10):
+            sent = False
+
+            # iqoptionapi 7.x — method อยู่บน IQ_Option โดยตรง
+            if hasattr(self.api, 'send_sms_code'):
+                self.api.send_sms_code(otp)
+                sent = True
+
+            # iqoptionapi 7.x — method อยู่บน internal .api object
+            elif hasattr(self.api, 'api') and hasattr(self.api.api, 'send_sms_code'):
+                self.api.api.send_sms_code(otp)
+                sent = True
+
+            # iqoptionapi บางเวอร์ชัน ใช้ resend_sms
+            elif hasattr(self.api, 'resend_sms'):
+                self.api.resend_sms(otp)
+                sent = True
+
+            if not sent:
+                logger.error(
+                    "iqoptionapi version ไม่รองรับ 2FA อัตโนมัติ — "
+                    "กรุณาปิด 2FA ใน IQ Option settings แล้วลองใหม่"
+                )
+                return False
+
+            # รอให้ WebSocket ยืนยัน (ไม่ connect() ซ้ำ)
+            logger.info("OTP ส่งแล้ว รอยืนยัน…")
+            for _ in range(15):
                 time.sleep(1)
-                if self.api.check_connect():
-                    self.api.change_balance(self.account_type)
-                    self._connected = True
-                    logger.info("Connected via OTP (%s account)", self.account_type)
-                    return True
-            logger.error("OTP login timeout — connection not established")
+                try:
+                    if self.api.check_connect():
+                        self.api.change_balance(self.account_type)
+                        self._connected = True
+                        self._in_2fa    = False
+                        logger.info("Connected via OTP (%s account)", self.account_type)
+                        return True
+                except Exception:
+                    pass
+
+            logger.error("OTP login timeout")
             return False
+
         except Exception as exc:
             logger.error("OTP error: %s", exc)
             return False
 
     def ensure_connected(self) -> bool:
-        """Reconnect if session dropped."""
+        """Reconnect if session dropped. Skipped during 2FA flow."""
+        if self._in_2fa:
+            return False   # ห้าม reconnect ระหว่างรอ OTP
         if not self._connected or not self.api:
             ok, _ = self.connect()
             return ok
         try:
             if not self.api.check_connect():
-                logger.warning("Connection lost – reconnecting …")
+                logger.warning("Connection lost – reconnecting…")
                 ok, _ = self.connect()
                 return ok
         except Exception:
@@ -75,17 +139,9 @@ class IQOptionConnector:
             return ok
         return True
 
-    def get_candles(
-        self,
-        asset: str,
-        timeframe_seconds: int,
-        count: int,
-    ) -> Optional[pd.DataFrame]:
-        """
-        Fetch the last `count` candles for `asset`.
-        Returns DataFrame[open, high, low, close, volume] sorted oldest→newest,
-        or None on failure.
-        """
+    # ── Data ───────────────────────────────────────────────────────────────────
+
+    def get_candles(self, asset: str, timeframe_seconds: int, count: int) -> Optional[pd.DataFrame]:
         if not self.ensure_connected():
             return None
         try:
@@ -93,13 +149,7 @@ class IQOptionConnector:
             if not candles:
                 return None
             df = pd.DataFrame(candles)
-            df = df.rename(columns={
-                "open": "open",
-                "max": "high",
-                "min": "low",
-                "close": "close",
-                "volume": "volume",
-            })
+            df = df.rename(columns={"max": "high", "min": "low"})
             df = df[["open", "high", "low", "close", "volume"]].astype(float)
             return df.reset_index(drop=True)
         except Exception as exc:
@@ -107,7 +157,6 @@ class IQOptionConnector:
             return None
 
     def get_balance(self) -> float:
-        """Return current account balance."""
         if not self.ensure_connected():
             return 0.0
         try:
@@ -115,26 +164,14 @@ class IQOptionConnector:
         except Exception:
             return 0.0
 
-    def place_trade(
-        self,
-        asset: str,
-        direction: str,   # "call" (BUY) or "put" (SELL)
-        amount: float,
-        duration_minutes: int,
-    ) -> Tuple[bool, Optional[int]]:
-        """
-        Open a binary option trade.
-        Returns (success, order_id).
-        """
+    def place_trade(self, asset: str, direction: str, amount: float, duration_minutes: int) -> Tuple[bool, Optional[int]]:
         if not self.ensure_connected():
             return False, None
         try:
             check, order_id = self.api.buy(amount, asset, direction, duration_minutes)
             if check:
-                logger.info(
-                    "Trade placed: %s %s $%.2f %dmin | id=%s",
-                    direction.upper(), asset, amount, duration_minutes, order_id,
-                )
+                logger.info("Trade placed: %s %s $%.2f %dmin | id=%s",
+                            direction.upper(), asset, amount, duration_minutes, order_id)
                 return True, order_id
             logger.warning("Trade rejected by IQ Option")
             return False, None
@@ -143,10 +180,6 @@ class IQOptionConnector:
             return False, None
 
     def get_trade_result(self, order_id: int, timeout: int = 120) -> Optional[float]:
-        """
-        Wait for a trade to close and return the profit/loss in USD.
-        Returns None if the result cannot be retrieved.
-        """
         if not self.ensure_connected():
             return None
         try:
@@ -161,7 +194,6 @@ class IQOptionConnector:
             return None
 
     def get_payout(self, asset: str) -> float:
-        """Return current payout percentage for the asset (0‒100)."""
         if not self.ensure_connected():
             return 0.0
         try:
@@ -173,7 +205,6 @@ class IQOptionConnector:
             return 0.0
 
     def is_market_open(self, asset: str) -> bool:
-        """Check if the asset is currently tradeable."""
         if not self.ensure_connected():
             return False
         try:
