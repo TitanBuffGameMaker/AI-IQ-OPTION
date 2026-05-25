@@ -165,18 +165,24 @@ class WorkingMemory:
         Return True if the AI should stop trading temporarily to cut drawdown.
         Conditions:
           - losing streak >= 3  OR
-          - recent win rate < 0.30
+          - recent win rate < 0.30  (requires at least 5 confirmed results)
         """
         streak = self.detect_losing_streak()
         if streak >= 3:
             logger.warning("WorkingMemory: losing streak=%d → PAUSE", streak)
             return True
 
+        # Only evaluate win-rate PAUSE when we have enough confirmed outcomes.
+        # Timed-out trades are stored with pnl=None and excluded here.
+        finished = [s for s in list(self._slots) if s.pnl is not None]
+        if len(finished) < 5:
+            return False
+
         pattern = self.get_recent_pattern()
         if pattern["recent_win_rate"] < 0.30:
             logger.warning(
-                "WorkingMemory: win_rate=%.2f < 0.30 → PAUSE",
-                pattern["recent_win_rate"],
+                "WorkingMemory: win_rate=%.2f < 0.30 (n=%d) → PAUSE",
+                pattern["recent_win_rate"], len(finished),
             )
             return True
 

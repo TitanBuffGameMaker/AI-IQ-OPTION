@@ -147,7 +147,13 @@ class TradingEnv(gym.Env):
         logger.info("Waiting %ds for trade to expire …", wait_seconds)
         time.sleep(wait_seconds)
 
-        pnl = self.connector.get_trade_result(order_id) or 0.0
+        pnl_result = self.connector.get_trade_result(order_id)
+        if pnl_result is None:
+            # API timed out — do NOT count as a loss; mark as skipped so the
+            # caller (server._ai_loop) won't record it in stats or working memory.
+            logger.warning("Trade result unavailable (timeout) — not counted as loss")
+            return 0.0, {"action": direction, "pnl": 0.0, "skipped": True}
+        pnl = pnl_result
         self._episode_pnl += pnl
         self._daily_pnl   += pnl
 
