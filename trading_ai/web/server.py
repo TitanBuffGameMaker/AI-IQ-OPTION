@@ -248,13 +248,15 @@ async def _execute_manual_trade(asset: str, direction: str):
     global _connector
     if not _connector:
         return
+    # Frontend sends display name ("GBP/USD (OTC)"); IQ Option API needs resolved name ("GBPUSD-OTC")
+    api_name = _resolved_asset_names.get(asset, asset)
     broadcast_sync({
         "type": "status",
         "message": f"Manual {direction.upper()}: {asset}",
         "level": "info",
     })
     ok, oid = _connector.place_trade(
-        asset=asset, direction=direction,
+        asset=api_name, direction=direction,
         amount=config.TRADE_AMOUNT,
         duration_minutes=config.TRADE_DURATION,
     )
