@@ -116,6 +116,18 @@ function handleMessage(msg) {
       applyStrategy(msg);
       break;
 
+    case 'log':
+      addLogEntry(msg);
+      break;
+
+    case 'log_history':
+      if (Array.isArray(msg.entries)) {
+        msg.entries.forEach(e => addLogEntry(e, /*batch=*/true));
+        const ll = document.getElementById('log-list');
+        if (ll) ll.scrollTop = ll.scrollHeight;
+      }
+      break;
+
     case 'otp_required':
       showOTPModal(msg.message);
       break;
@@ -580,6 +592,73 @@ function switchTab(name) {
   document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
   document.querySelector(`[data-tab="${name}"]`).classList.add('active');
   document.getElementById(`tab-${name}`).classList.add('active');
+  // Clear unread badge when user opens logs tab
+  if (name === 'logs') {
+    const badge = document.querySelector('#tab-btn-logs .log-badge-count');
+    if (badge) { badge.style.display = 'none'; badge.textContent = '0'; }
+    _logUnread = 0;
+    // Scroll to bottom
+    const ll = document.getElementById('log-list');
+    if (ll) ll.scrollTop = ll.scrollHeight;
+  }
+}
+
+// ── Live Logs ─────────────────────────────────────────────────────────────────
+let _logFilter  = 'all';
+let _logUnread  = 0;
+const _LOG_MAX  = 300;     // max entries to keep in DOM
+
+function setLogFilter(lvl) {
+  _logFilter = lvl;
+  document.querySelectorAll('.log-filter-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.lvl === lvl);
+  });
+  // Show/hide existing entries
+  document.querySelectorAll('#log-list .log-entry').forEach(el => {
+    el.style.display = (lvl === 'all' || el.dataset.lvl === lvl) ? '' : 'none';
+  });
+}
+
+function clearLogs() {
+  const ll = document.getElementById('log-list');
+  if (ll) ll.innerHTML = '';
+  _logUnread = 0;
+  const badge = document.querySelector('#tab-btn-logs .log-badge-count');
+  if (badge) { badge.style.display = 'none'; badge.textContent = '0'; }
+}
+
+function addLogEntry(entry, batch) {
+  const ll = document.getElementById('log-list');
+  if (!ll) return;
+
+  const lvl  = entry.level || 'info';
+  const show = (_logFilter === 'all' || _logFilter === lvl);
+  const row  = document.createElement('div');
+  row.className = `log-entry ${lvl}`;
+  row.dataset.lvl = lvl;
+  row.style.display = show ? '' : 'none';
+  row.innerHTML =
+    `<span class="log-time">${entry.time || ''}</span>` +
+    `<span class="log-badge">${lvl.toUpperCase()}</span>` +
+    `<span class="log-msg">[${entry.name || ''}] ${entry.message || ''}</span>`;
+  ll.appendChild(row);
+
+  // Trim old entries
+  while (ll.children.length > _LOG_MAX) ll.removeChild(ll.firstChild);
+
+  // Auto-scroll only if we're within 60px of bottom
+  if (!batch) {
+    const atBottom = ll.scrollHeight - ll.scrollTop - ll.clientHeight < 60;
+    if (atBottom) ll.scrollTop = ll.scrollHeight;
+
+    // Unread badge when logs tab is NOT active
+    const logsTabActive = document.getElementById('tab-logs')?.classList.contains('active');
+    if (!logsTabActive && (lvl === 'warn' || lvl === 'error')) {
+      _logUnread++;
+      const badge = document.querySelector('#tab-btn-logs .log-badge-count');
+      if (badge) { badge.style.display = 'inline-block'; badge.textContent = _logUnread; }
+    }
+  }
 }
 
 // ── Checks modal ──────────────────────────────────────────────────────────────

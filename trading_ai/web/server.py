@@ -60,11 +60,60 @@ _otp_event      = threading.Event()
 _otp_code:  str = ""
 _pending_creds: Dict[str, str] = {}   # {"email":..,"password":..} from UI login form
 
+# ── Live-log broadcast ─────────────────────────────────────────────────────────
+_log_buffer: deque = deque(maxlen=300)   # last 300 log lines for new-client catch-up
+_log_broadcasting = False                # re-entrancy guard for the WS handler
+
+
+class _WsBroadcastHandler(logging.Handler):
+    """Forwards log records to every connected WebSocket client in real-time."""
+
+    # Map Python log levels → UI severity labels
+    _LEVEL_MAP = {
+        "DEBUG":    "debug",
+        "INFO":     "info",
+        "WARNING":  "warn",
+        "ERROR":    "error",
+        "CRITICAL": "error",
+    }
+
+    def emit(self, record: logging.LogRecord) -> None:
+        global _log_broadcasting
+        if _log_broadcasting:
+            return   # prevent recursion
+        try:
+            _log_broadcasting = True
+            lvl = self._LEVEL_MAP.get(record.levelname, "info")
+            parts = record.name.split(".")
+            short = ".".join(parts[-2:]) if len(parts) >= 2 else record.name
+            entry = {
+                "type":    "log",
+                "level":   lvl,
+                "name":    short,
+                "message": record.getMessage(),
+                "time":    time.strftime("%H:%M:%S", time.localtime(record.created)),
+            }
+            _log_buffer.append(entry)
+            broadcast_sync(entry)
+        except Exception:
+            pass
+        finally:
+            _log_broadcasting = False
+
+
+def _install_ws_log_handler() -> None:
+    handler = _WsBroadcastHandler()
+    handler.setLevel(logging.DEBUG)
+    # attach to the root logger so every module's output flows through
+    root = logging.getLogger()
+    root.addHandler(handler)
+
 # ── FastAPI app ───────────────────────────────────────────────────────────────
 @contextlib.asynccontextmanager
 async def _lifespan(application):
     global _loop
     _loop = asyncio.get_running_loop()
+    _install_ws_log_handler()
     threading.Thread(target=_init_components, daemon=True).start()
     yield
 
@@ -203,6 +252,12 @@ async def _send_current_state(ws: WebSocket):
         await manager.send(ws, {
             "type": "brain",
             **_brain.get_status(ppo_agent=_agent),
+        })
+    # Replay buffered log lines so the Logs panel is populated immediately
+    if _log_buffer:
+        await manager.send(ws, {
+            "type":    "log_history",
+            "entries": list(_log_buffer),
         })
 
 

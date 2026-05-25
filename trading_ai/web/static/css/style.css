@@ -349,6 +349,56 @@ body {
 .tab-panel { display: none; }
 .tab-panel.active { display: block; }
 
+/* ── Log panel ─────────────────────────────────────────────────────────── */
+.log-panel-wrap.active { display: flex; flex-direction: column; }
+.log-toolbar {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 6px 0 8px; gap: 4px; flex-shrink: 0;
+}
+.log-filters { display: flex; gap: 4px; }
+.log-filter-btn {
+  padding: 3px 8px; border-radius: 10px; font-size: 10px; font-weight: 600;
+  border: 1px solid var(--border); background: var(--card); color: var(--text-muted);
+  cursor: pointer; transition: all .15s;
+}
+.log-filter-btn.active, .log-filter-btn:hover { background: var(--blue); color: #fff; border-color: var(--blue); }
+.log-filter-btn.warn.active  { background: #f59e0b; border-color: #f59e0b; }
+.log-filter-btn.error.active { background: #ef4444; border-color: #ef4444; }
+.log-clear-btn {
+  background: none; border: 1px solid var(--border); color: var(--text-muted);
+  border-radius: 6px; padding: 3px 8px; font-size: 12px; cursor: pointer;
+}
+.log-clear-btn:hover { border-color: #ef4444; color: #ef4444; }
+.log-list {
+  flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 1px;
+  max-height: calc(100vh - 160px);
+}
+.log-entry {
+  display: grid; grid-template-columns: 52px 36px 1fr; gap: 4px; align-items: baseline;
+  padding: 3px 0; border-bottom: 1px solid var(--border); font-size: 10px;
+  font-family: 'Consolas', 'Monaco', monospace; line-height: 1.4;
+}
+.log-entry .log-time  { color: var(--text-muted); flex-shrink: 0; }
+.log-entry .log-badge {
+  font-size: 9px; font-weight: 700; padding: 1px 4px; border-radius: 3px;
+  text-align: center; letter-spacing: 0.5px;
+}
+.log-entry.info  .log-badge { background: #1e3a5f; color: #60a5fa; }
+.log-entry.warn  .log-badge { background: #451a03; color: #f59e0b; }
+.log-entry.error .log-badge { background: #3b0a0a; color: #f87171; }
+.log-entry.debug .log-badge { background: #1a1a2e; color: #6b7280; }
+.log-entry .log-msg { color: var(--text); word-break: break-all; }
+.log-entry.warn  .log-msg { color: #fcd34d; }
+.log-entry.error .log-msg { color: #fca5a5; }
+.log-entry.debug .log-msg { color: #6b7280; }
+/* badge badge showing live-count on the tab */
+#tab-btn-logs .log-badge-count {
+  display: inline-block; background: #ef4444; color: #fff;
+  font-size: 9px; border-radius: 6px; padding: 0 4px; margin-left: 2px;
+  min-width: 14px; text-align: center; line-height: 14px;
+  vertical-align: middle; display: none;
+}
+
 /* Brain stats */
 .brain-stat {
   display: flex;

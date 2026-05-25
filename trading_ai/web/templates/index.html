@@ -220,9 +220,10 @@
   <aside id="sidebar">
 
     <div class="sidebar-tabs">
-      <div class="sidebar-tab active" data-tab="brain" onclick="switchTab('brain')">🧠 Brain</div>
-      <div class="sidebar-tab" data-tab="history"      onclick="switchTab('history')">📋 History</div>
-      <div class="sidebar-tab" data-tab="settings"     onclick="switchTab('settings')">⚙️ Settings</div>
+      <div class="sidebar-tab active" data-tab="brain"    onclick="switchTab('brain')">🧠 Brain</div>
+      <div class="sidebar-tab" data-tab="history"         onclick="switchTab('history')">📋 History</div>
+      <div class="sidebar-tab" data-tab="settings"        onclick="switchTab('settings')">⚙️ Settings</div>
+      <div class="sidebar-tab" data-tab="logs" id="tab-btn-logs" onclick="switchTab('logs')">📝 Logs<span class="log-badge-count">0</span></div>
     </div>
 
     <div class="sidebar-content">
@@ -418,6 +419,23 @@
           ⚠️ เปลี่ยน PRACTICE → REAL เฉพาะตอน AI พิสูจน์แล้วว่า win rate &gt; 60%<br>
           🔴 ตั้ง Daily loss limit ใน .env ก่อนใช้เงินจริง
         </div>
+
+      </div>
+
+      <!-- ── Logs panel ── -->
+      <div id="tab-logs" class="tab-panel log-panel-wrap">
+
+        <div class="log-toolbar">
+          <div class="log-filters">
+            <button class="log-filter-btn active" data-lvl="all"   onclick="setLogFilter('all')">ทั้งหมด</button>
+            <button class="log-filter-btn"         data-lvl="info"  onclick="setLogFilter('info')">INFO</button>
+            <button class="log-filter-btn warn"    data-lvl="warn"  onclick="setLogFilter('warn')">WARN</button>
+            <button class="log-filter-btn error"   data-lvl="error" onclick="setLogFilter('error')">ERR</button>
+          </div>
+          <button class="log-clear-btn" onclick="clearLogs()" title="ลบ log ทั้งหมด">🗑</button>
+        </div>
+
+        <div id="log-list" class="log-list"></div>
 
       </div>
 
