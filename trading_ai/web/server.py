@@ -54,6 +54,8 @@ _ai_running  = False
 _trade_stats = {"trades": 0, "wins": 0, "pnl": 0.0}
 _trade_history: deque = deque(maxlen=200)
 _check_results: List[Dict] = []
+_otp_event   = threading.Event()
+_otp_code:   str = ""
 
 # ── FastAPI app ───────────────────────────────────────────────────────────────
 app = FastAPI(title="IQ Option AI Trading Dashboard", docs_url=None)
@@ -210,6 +212,11 @@ async def _handle_client_message(ws: WebSocket, msg: Dict):
             "message": "Settings updated",
             "level": "success",
         })
+
+    elif mtype == "otp":
+        global _otp_code
+        _otp_code = str(msg.get("code", "")).strip()
+        _otp_event.set()
 
     elif mtype == "ping":
         await manager.send(ws, {"type": "pong"})
@@ -473,9 +480,21 @@ def _init_components():
     from trading_ai.core.iq_connector import IQOptionConnector
     _connector = IQOptionConnector(config.IQ_EMAIL, config.IQ_PASSWORD,
                                     config.IQ_ACCOUNT_TYPE)
-    connected = _connector.connect()
-    bal = _connector.get_balance() if connected else 0.0
+    connected, reason = _connector.connect()
 
+    # ── 2FA / OTP flow ───────────────────────────────────────────────────────
+    if not connected and str(reason).upper() == "2FA":
+        broadcast_sync({"type": "otp_required", "message": "กรุณากรอก OTP 5 หลักจาก SMS/Email"})
+        logger.info("Waiting for OTP from web UI…")
+        _otp_event.clear()
+        _otp_event.wait(timeout=120)   # รอ OTP สูงสุด 2 นาที
+        if _otp_code:
+            connected = _connector.submit_otp(_otp_code)
+        if not connected:
+            broadcast_sync({"type":"status","message":"❌ OTP ไม่ถูกต้อง – รีสตาร์ทแล้วลองใหม่","level":"error"})
+            return
+
+    bal = _connector.get_balance() if connected else 0.0
     broadcast_sync({
         "type": "connection",
         "connected": connected,

@@ -105,7 +105,34 @@ function handleMessage(msg) {
     case 'strategy':
       applyStrategy(msg);
       break;
+
+    case 'otp_required':
+      showOTPModal(msg.message);
+      break;
   }
+}
+
+// ── OTP Modal ─────────────────────────────────────────────────────────────────
+function showOTPModal(message) {
+  const overlay = document.getElementById('otp-overlay');
+  if (!overlay) return;
+  if (message) document.getElementById('otp-msg').textContent = message;
+  document.getElementById('otp-error').style.display = 'none';
+  document.getElementById('otp-input').value = '';
+  overlay.style.display = 'flex';
+  setTimeout(() => document.getElementById('otp-input').focus(), 100);
+}
+
+function submitOTP() {
+  const code = document.getElementById('otp-input').value.trim();
+  if (code.length !== 5 || !/^\d+$/.test(code)) {
+    document.getElementById('otp-error').style.display = 'block';
+    document.getElementById('otp-error').textContent = 'OTP ต้องเป็นตัวเลข 5 หลัก';
+    return;
+  }
+  send({ type: 'otp', code });
+  document.getElementById('otp-overlay').style.display = 'none';
+  setStatus('ส่ง OTP แล้ว กำลังยืนยัน…', 'info');
 }
 
 function applyTraining(msg) {

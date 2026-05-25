@@ -21,33 +21,57 @@ class IQOptionConnector:
         self.api: Optional[IQ_Option] = None
         self._connected = False
 
-    def connect(self) -> bool:
-        """Establish connection to IQ Option. Returns True on success."""
+    def connect(self) -> Tuple[bool, str]:
+        """
+        Establish connection to IQ Option.
+        Returns (True, "ok") on success, (False, "2FA") when OTP needed,
+        or (False, reason) on other failures.
+        """
         try:
             self.api = IQ_Option(self.email, self.password)
             check, reason = self.api.connect()
             if not check:
                 logger.error("IQ Option connection failed: %s", reason)
-                return False
+                return False, str(reason)
 
             self.api.change_balance(self.account_type)
             self._connected = True
             logger.info("Connected to IQ Option (%s account)", self.account_type)
-            return True
+            return True, "ok"
         except Exception as exc:
             logger.error("Connection error: %s", exc)
+            return False, str(exc)
+
+    def submit_otp(self, otp: str) -> bool:
+        """Submit 5-digit OTP for 2FA login. Call after connect() returns (False, '2FA')."""
+        try:
+            self.api.send_sms_code(otp)
+            time.sleep(2)
+            check, reason = self.api.connect()
+            if not check:
+                logger.error("OTP login failed: %s", reason)
+                return False
+            self.api.change_balance(self.account_type)
+            self._connected = True
+            logger.info("Connected via OTP (%s account)", self.account_type)
+            return True
+        except Exception as exc:
+            logger.error("OTP error: %s", exc)
             return False
 
     def ensure_connected(self) -> bool:
         """Reconnect if session dropped."""
         if not self._connected or not self.api:
-            return self.connect()
+            ok, _ = self.connect()
+            return ok
         try:
             if not self.api.check_connect():
                 logger.warning("Connection lost – reconnecting …")
-                return self.connect()
+                ok, _ = self.connect()
+                return ok
         except Exception:
-            return self.connect()
+            ok, _ = self.connect()
+            return ok
         return True
 
     def get_candles(

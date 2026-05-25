@@ -56,6 +56,28 @@
 
 </nav>
 
+<!-- ════════════════════════ OTP MODAL ═════════════════════════ -->
+<div id="otp-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.75);z-index:9999;display:none;align-items:center;justify-content:center;">
+  <div style="background:#1a1a2e;border:1px solid #7c4dff;border-radius:16px;padding:32px 36px;width:320px;text-align:center;box-shadow:0 8px 40px rgba(124,77,255,0.3);">
+    <div style="font-size:36px;margin-bottom:8px;">🔐</div>
+    <div style="font-size:18px;font-weight:700;color:#fff;margin-bottom:6px;">ยืนยัน 2FA</div>
+    <div style="font-size:13px;color:#9e8aff;margin-bottom:20px;" id="otp-msg">กรุณากรอก OTP 5 หลักจาก SMS หรือ Email</div>
+    <input id="otp-input" type="text" maxlength="5" inputmode="numeric" pattern="[0-9]*"
+      placeholder="_ _ _ _ _"
+      style="width:100%;text-align:center;font-size:28px;letter-spacing:10px;font-weight:700;
+             padding:12px;border-radius:10px;border:2px solid #7c4dff;background:#0d0d1a;
+             color:#fff;outline:none;margin-bottom:16px;box-sizing:border-box;"
+      onkeydown="if(event.key==='Enter')submitOTP()">
+    <button onclick="submitOTP()"
+      style="width:100%;padding:12px;border-radius:10px;border:none;
+             background:linear-gradient(135deg,#7c4dff,#2962ff);color:#fff;
+             font-size:15px;font-weight:700;cursor:pointer;">
+      ยืนยัน OTP
+    </button>
+    <div id="otp-error" style="color:#f23645;font-size:12px;margin-top:10px;display:none;">OTP ไม่ถูกต้อง กรุณาลองใหม่</div>
+  </div>
+</div>
+
 <!-- ════════════════════════ CHECK BANNER ══════════════════════ -->
 <div id="check-banner">
   <span id="banner-text">🔍 กำลังตรวจสอบการตั้งค่า IQ Option…</span>
