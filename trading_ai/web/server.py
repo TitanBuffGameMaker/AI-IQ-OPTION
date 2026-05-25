@@ -417,15 +417,23 @@ def _ai_loop():
 
 
 # ── Startup: init all components ──────────────────────────────────────────────
-OTC_ASSETS = ["EUR/USD (OTC)", "GBP/USD (OTC)", "AUD/USD (OTC)", "GBP/JPY (OTC)"]
+OTC_ASSETS = ["EUR/USD (OTC)", "GBP/USD (OTC)", "AUD/USD (OTC)", "EUR/JPY (OTC)"]
 
 # IQ Option API names for OTC assets – tries each in order until one works.
-# During weekends the platform uses OTC variants; weekdays may use regular names.
 OTC_ASSET_MAP: Dict[str, List[str]] = {
     "EUR/USD (OTC)": ["EURUSD-OTC", "EURUSD_otc", "frxEURUSD", "EURUSD"],
     "GBP/USD (OTC)": ["GBPUSD-OTC", "GBPUSD_otc", "frxGBPUSD", "GBPUSD"],
     "AUD/USD (OTC)": ["AUDUSD-OTC", "AUDUSD_otc", "frxAUDUSD", "AUDUSD"],
-    "GBP/JPY (OTC)": ["GBPJPY-OTC", "GBPJPY_otc", "frxGBPJPY", "GBPJPY"],
+    "EUR/JPY (OTC)": ["EURJPY-OTC", "EURJPY_otc", "frxEURJPY", "EURJPY"],
+}
+
+# Sanity-check price ranges per asset.  Prices outside these bounds mean
+# iqoptionapi returned data for the WRONG pair (shared-state race condition).
+PRICE_RANGES: Dict[str, tuple] = {
+    "EUR/USD (OTC)": (0.90, 1.45),
+    "GBP/USD (OTC)": (1.10, 1.75),
+    "AUD/USD (OTC)": (0.50, 0.90),
+    "EUR/JPY (OTC)": (130.0, 175.0),
 }
 
 # Cache: display_name → resolved api_name (once found, reuse)
@@ -436,18 +444,36 @@ _candle_history: Dict[str, List[Dict]] = {a: [] for a in OTC_ASSETS}
 
 
 def _resolve_asset_name(display_name: str) -> Optional[str]:
-    """Find the working IQ Option API name for an OTC asset."""
+    """
+    Find the working IQ Option API name for an OTC asset.
+
+    iqoptionapi uses a shared WebSocket buffer for candle data.  Calling
+    get_candles() for multiple assets in rapid succession can return stale
+    data from the previous request.  We guard against this by:
+      1. Sleeping 1.5 s after each request so the WS response settles.
+      2. Validating the returned price against known sane ranges.
+    """
     if display_name in _resolved_asset_names:
         return _resolved_asset_names[display_name]
+
+    lo, hi = PRICE_RANGES.get(display_name, (0.0, 1e9))
+
     for api_name in OTC_ASSET_MAP.get(display_name, []):
         try:
             df = _connector.get_candles(asset=api_name, timeframe_seconds=60, count=5)
-            if df is not None and len(df) > 0:
+            time.sleep(1.5)   # let WS buffer flush before next request
+            if df is None or len(df) == 0:
+                continue
+            price = float(df["close"].iloc[-1])
+            if lo <= price <= hi:
                 _resolved_asset_names[display_name] = api_name
-                logger.info("Resolved %s → %s", display_name, api_name)
+                logger.info("Resolved %s → %s (price=%.5f)", display_name, api_name, price)
                 return api_name
+            logger.warning("Price %.5f out of range [%.2f, %.2f] for %s via %s — skipping",
+                           price, lo, hi, display_name, api_name)
         except Exception:
             continue
+
     logger.warning("Could not resolve API name for %s", display_name)
     return None
 
@@ -460,6 +486,7 @@ def _fetch_initial_candles():
             continue
         try:
             df = _connector.get_candles(asset=api_name, timeframe_seconds=30, count=100)
+            time.sleep(1.5)   # let WS buffer flush before next asset
             if df is None or len(df) == 0:
                 continue
             candles = []
@@ -607,14 +634,25 @@ def _price_loop():
                 df = _connector.get_candles(
                     asset=api_name, timeframe_seconds=30, count=5
                 )
+                time.sleep(1.2)   # wait for WS buffer to flush before next asset
                 if df is None or len(df) < 2:
                     continue
 
                 last       = df.iloc[-1]
                 prev_close = float(df["close"].iloc[-2])
                 cur_close  = float(last["close"])
-                open_price = float(df["close"].iloc[0])   # first candle of batch
+                open_price = float(df["close"].iloc[0])
                 change_pct = (cur_close - open_price) / (open_price + 1e-9) * 100
+
+                # Sanity-check: if price is outside expected range the WS gave
+                # us stale data from the previous asset request — invalidate
+                # the resolved name so it gets re-probed next cycle.
+                lo, hi = PRICE_RANGES.get(display_name, (0.0, 1e9))
+                if not (lo <= cur_close <= hi):
+                    logger.warning("Price sanity fail %s: %.5f not in [%.2f, %.2f] — re-resolving",
+                                   display_name, cur_close, lo, hi)
+                    _resolved_asset_names.pop(display_name, None)
+                    continue
 
                 candle = {
                     "time":  int(time.time()),

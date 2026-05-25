@@ -10,7 +10,7 @@ const OTC_ASSETS = [
   'EUR/USD (OTC)',
   'GBP/USD (OTC)',
   'AUD/USD (OTC)',
-  'GBP/JPY (OTC)',
+  'EUR/JPY (OTC)',
 ];
 
 // ── State ─────────────────────────────────────────────────────────────────────
