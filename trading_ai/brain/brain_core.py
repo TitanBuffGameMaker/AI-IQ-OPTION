@@ -67,9 +67,11 @@ class BrainCore:
     INTERNET_REFRESH_INTERVAL = 1800   # 30 min
     RESEARCH_INTERVAL         = 3600   # 1 hour
 
-    def __init__(self, asset: str = None, base_dir: str = None):
-        self.asset    = asset or config.ASSET
-        self.base_dir = base_dir or config.MODEL_DIR
+    def __init__(self, asset: str = None, base_dir: str = None,
+                 account_type: str = None):
+        self.asset        = asset or config.ASSET
+        self.base_dir     = base_dir or config.MODEL_DIR
+        self.account_type = (account_type or config.IQ_ACCOUNT_TYPE or "PRACTICE").upper()
 
         self.graph      = KnowledgeGraph(base_dir=self.base_dir)
         self.short_term = ShortTermMemory(capacity=1000)
@@ -89,7 +91,7 @@ class BrainCore:
         )
 
         # ── Living Brain subsystems ─────────────────────────────────────────
-        self.working_memory = WorkingMemory(capacity=20)
+        self.working_memory = WorkingMemory(capacity=20, account_type=self.account_type)
         self.strategy_lib   = StrategyLibrary(base_dir=self.base_dir)
         self.reflection     = SelfReflectionEngine(base_dir=self.base_dir)
         self.fast_learner   = FastLearner(obs_size=OBS_SIZE)
@@ -110,6 +112,14 @@ class BrainCore:
             "BrainCore ULTRA (Living Brain) online | asset=%s | nodes=%d",
             self.asset, self.graph.stats()["total_nodes"]
         )
+
+    # ── Account-type plumbing ─────────────────────────────────────────────────
+
+    def set_account_type(self, account_type: str) -> None:
+        """Propagate account type to subsystems that change behaviour by it."""
+        new = (account_type or "PRACTICE").upper()
+        self.account_type = new
+        self.working_memory.set_account_type(new)
 
     # ── Main interface ─────────────────────────────────────────────────────────
 
@@ -152,12 +162,24 @@ class BrainCore:
             strategy_name=strategy_name,
         )
 
-        # ── Should-pause override ────────────────────────────────────────────
+        # ── Record this cycle's signal strength for recovery tracking ───────
+        # (no-op on PRACTICE; on REAL it counts toward resume-readiness)
+        self.working_memory.record_observation(signal.confidence)
+
+        # ── Should-pause override (REAL accounts only) ──────────────────────
         if should_pause and signal.action != 0:
+            status = self.working_memory.get_pause_status()
             signal.action     = 0
             signal.confidence = 0.9
-            signal.reasoning.append("WorkingMemory: PAUSE — too many losses")
-            logger.warning("BrainCore: WorkingMemory recommends PAUSE")
+            signal.reasoning.append(
+                f"PAUSE (REAL) — {status.get('reason','')}; "
+                f"cool-off {status.get('cooldown_remaining',0)}s, "
+                f"strong {status.get('strong_seen',0)}/{status.get('strong_needed',0)}"
+            )
+            logger.info("BrainCore: PAUSE active — recovery %d/%d strong, %ds cool-off left",
+                        status.get("strong_seen", 0),
+                        status.get("strong_needed", 0),
+                        status.get("cooldown_remaining", 0))
 
         # ── Update state ─────────────────────────────────────────────────────
         self._last_confidence    = signal.confidence
@@ -266,6 +288,7 @@ class BrainCore:
         # Living Brain extras
         wm_pattern       = self.working_memory.get_recent_pattern()
         should_pause     = self.working_memory.should_pause()
+        pause_status     = self.working_memory.get_pause_status()
         strategy_stats   = self.strategy_lib.get_stats()
         recent_mistakes  = self.reflection.get_recent_mistakes(5)
         improvement_tips = self.reflection.get_improvement_tips()
@@ -299,6 +322,8 @@ class BrainCore:
             "improvement_tips":         improvement_tips,
             "working_memory_pattern":   wm_pattern,
             "should_pause":             should_pause,
+            "pause_status":             pause_status,
+            "account_type":             self.account_type,
             "active_strategy":          self._last_strategy_name,
         }
 

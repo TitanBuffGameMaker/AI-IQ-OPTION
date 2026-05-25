@@ -38,9 +38,80 @@ class WorkingMemory:
     should_pause()         — True if AI should stop trading temporarily
     """
 
-    def __init__(self, capacity: int = 20):
+    # Recovery thresholds for REAL-account pause
+    RECOVERY_COOLDOWN_SEC = 300       # 5-min cool-off after pause triggered
+    RECOVERY_STRONG_NEEDED = 3        # need this many high-conf signals observed
+    RECOVERY_STRONG_THRESHOLD = 0.55  # what counts as a "strong" signal
+
+    def __init__(self, capacity: int = 20, account_type: str = "PRACTICE"):
         self.capacity = capacity
+        self.account_type = (account_type or "PRACTICE").upper()
         self._slots: deque = deque(maxlen=capacity)
+
+        # Recovery / pause state (used only for REAL accounts)
+        self._pause_started_at: Optional[float]  = None
+        self._pause_reason:     str              = ""
+        self._strong_seen:      int              = 0
+        self._observations:     int              = 0
+
+    def set_account_type(self, account_type: str) -> None:
+        """Switch account type at runtime (PRACTICE ↔ REAL)."""
+        new = (account_type or "PRACTICE").upper()
+        if new != self.account_type:
+            logger.info("WorkingMemory: account_type %s → %s", self.account_type, new)
+            self.account_type = new
+            # Moving to PRACTICE clears any active pause
+            if new == "PRACTICE" and self._pause_started_at is not None:
+                self._clear_pause("switched to PRACTICE")
+
+    def record_observation(self, signal_confidence: float) -> None:
+        """
+        Called every brain.think() cycle. While in REAL-account pause, tracks
+        strong-signal observations so we can decide when the AI has 'understood'
+        the market again and is ready to resume.
+        """
+        if self._pause_started_at is None:
+            return
+        self._observations += 1
+        if signal_confidence >= self.RECOVERY_STRONG_THRESHOLD:
+            self._strong_seen += 1
+
+    def get_pause_status(self) -> Dict:
+        """For UI: snapshot of recovery state."""
+        if self._pause_started_at is None:
+            return {"paused": False, "account_type": self.account_type}
+        elapsed = time.time() - self._pause_started_at
+        return {
+            "paused":             True,
+            "account_type":       self.account_type,
+            "reason":             self._pause_reason,
+            "elapsed_seconds":    int(elapsed),
+            "cooldown_remaining": max(0, self.RECOVERY_COOLDOWN_SEC - int(elapsed)),
+            "strong_seen":        self._strong_seen,
+            "strong_needed":      self.RECOVERY_STRONG_NEEDED,
+            "observations":       self._observations,
+        }
+
+    def _clear_pause(self, why: str = "") -> None:
+        if self._pause_started_at is None:
+            return
+        elapsed = time.time() - self._pause_started_at
+        logger.info("WorkingMemory: PAUSE cleared after %.0fs (%d strong signals) — %s",
+                    elapsed, self._strong_seen, why)
+        self._pause_started_at = None
+        self._pause_reason     = ""
+        self._strong_seen      = 0
+        self._observations     = 0
+
+    def _recovery_ready(self) -> bool:
+        if self._pause_started_at is None:
+            return True
+        elapsed = time.time() - self._pause_started_at
+        if elapsed < self.RECOVERY_COOLDOWN_SEC:
+            return False
+        if self._strong_seen < self.RECOVERY_STRONG_NEEDED:
+            return False
+        return True
 
     # ── Mutation ───────────────────────────────────────────────────────────────
 
@@ -162,29 +233,55 @@ class WorkingMemory:
 
     def should_pause(self) -> bool:
         """
-        Return True if the AI should stop trading temporarily to cut drawdown.
-        Conditions:
+        Decide whether to stop trading.
+
+        PRACTICE account → NEVER pause.  Practice is the training ground:
+        every loss is a learning signal, so the brain must keep trading to
+        improve.
+
+        REAL account → pause to protect the balance when things go wrong,
+        and only resume once the brain has 'understood' the situation:
+          1. Cool-off period (5 min) has elapsed AND
+          2. We've observed RECOVERY_STRONG_NEEDED high-confidence signals
+             during the pause (showing market clarity has returned).
+
+        Trigger conditions (REAL only):
           - losing streak >= 3  OR
           - recent win rate < 0.30  (requires at least 5 confirmed results)
         """
-        streak = self.detect_losing_streak()
-        if streak >= 3:
-            logger.warning("WorkingMemory: losing streak=%d → PAUSE", streak)
-            return True
-
-        # Only evaluate win-rate PAUSE when we have enough confirmed outcomes.
-        # Timed-out trades are stored with pnl=None and excluded here.
-        finished = [s for s in list(self._slots) if s.pnl is not None]
-        if len(finished) < 5:
+        # ── PRACTICE: never pause; clear stale state if account switched ───
+        if self.account_type == "PRACTICE":
+            if self._pause_started_at is not None:
+                self._clear_pause("PRACTICE never pauses")
             return False
 
-        pattern = self.get_recent_pattern()
-        if pattern["recent_win_rate"] < 0.30:
-            logger.warning(
-                "WorkingMemory: win_rate=%.2f < 0.30 (n=%d) → PAUSE",
-                pattern["recent_win_rate"], len(finished),
-            )
+        # ── Already in pause: check whether recovery conditions are met ────
+        if self._pause_started_at is not None:
+            if self._recovery_ready():
+                self._clear_pause("recovery conditions met — RESUMING")
+                return False
             return True
+
+        # ── Evaluate trigger conditions ────────────────────────────────────
+        streak = self.detect_losing_streak()
+        if streak >= 3:
+            self._pause_started_at = time.time()
+            self._pause_reason     = f"losing streak={streak}"
+            self._strong_seen      = 0
+            self._observations     = 0
+            logger.warning("WorkingMemory: PAUSE (REAL) — %s. Recovering…", self._pause_reason)
+            return True
+
+        finished = [s for s in list(self._slots) if s.pnl is not None]
+        if len(finished) >= 5:
+            pattern = self.get_recent_pattern()
+            if pattern["recent_win_rate"] < 0.30:
+                self._pause_started_at = time.time()
+                self._pause_reason     = f"win_rate={pattern['recent_win_rate']:.2f} (n={len(finished)})"
+                self._strong_seen      = 0
+                self._observations     = 0
+                logger.warning("WorkingMemory: PAUSE (REAL) — %s. Recovering…", self._pause_reason)
+                return True
 
         return False
 

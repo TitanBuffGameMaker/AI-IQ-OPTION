@@ -337,6 +337,26 @@ def _apply_settings(msg: Dict):
     if "duration" in msg:
         val = str(msg["duration"]).replace("m", "")
         config.TRADE_DURATION = int(val)
+    if "account" in msg:
+        new_account = str(msg["account"]).upper()
+        if new_account in ("PRACTICE", "REAL"):
+            config.IQ_ACCOUNT_TYPE = new_account
+            if _connector:
+                _connector.account_type = new_account
+                try:
+                    if _connector.api:
+                        _connector.api.change_balance(new_account)
+                except Exception as exc:
+                    logger.warning("change_balance failed: %s", exc)
+            if _brain:
+                _brain.set_account_type(new_account)
+            broadcast_sync({
+                "type": "status",
+                "message": f"บัญชี: {new_account}" +
+                           (" — โหมดเรียนรู้ (ไม่หยุดเทรด)" if new_account == "PRACTICE"
+                            else " — โหมดจริง (จะหยุดเพื่อรักษายอดเมื่อแพ้)"),
+                "level": "info",
+            })
 
 
 # ── AI trading loop (runs in background thread) ───────────────────────────────
@@ -499,6 +519,8 @@ def _ai_loop():
                 "win_rate":     round(strat_wr, 3),
                 "tips":         brain_status.get("improvement_tips", []),
                 "should_pause": brain_status.get("should_pause", False),
+                "pause_status": brain_status.get("pause_status", {"paused": False}),
+                "account_type": brain_status.get("account_type", "PRACTICE"),
                 "mistakes":     brain_status.get("recent_mistakes", []),
             })
         except Exception as _strat_exc:
@@ -721,7 +743,8 @@ def _init_components():
     _knowledge = KnowledgeBase(base_dir=config.MODEL_DIR)
     _agent     = PPOAgent(obs_size=OBS_SIZE, n_actions=3)
     _knowledge.load_brain(_agent)
-    _brain     = BrainCore(asset=config.ASSET, base_dir=config.MODEL_DIR)
+    _brain     = BrainCore(asset=config.ASSET, base_dir=config.MODEL_DIR,
+                           account_type=config.IQ_ACCOUNT_TYPE)
 
     # Restore cumulative trade history from disk and push to any connected client
     _load_trade_stats()
