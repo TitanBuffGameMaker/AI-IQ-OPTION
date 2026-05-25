@@ -46,15 +46,16 @@ class IQOptionConnector:
         """Submit 5-digit OTP for 2FA login. Call after connect() returns (False, '2FA')."""
         try:
             self.api.send_sms_code(otp)
-            time.sleep(2)
-            check, reason = self.api.connect()
-            if not check:
-                logger.error("OTP login failed: %s", reason)
-                return False
-            self.api.change_balance(self.account_type)
-            self._connected = True
-            logger.info("Connected via OTP (%s account)", self.account_type)
-            return True
+            # รอให้ server ยืนยัน OTP โดยไม่ connect() ซ้ำ (จะส่ง SMS ซ้ำ)
+            for _ in range(10):
+                time.sleep(1)
+                if self.api.check_connect():
+                    self.api.change_balance(self.account_type)
+                    self._connected = True
+                    logger.info("Connected via OTP (%s account)", self.account_type)
+                    return True
+            logger.error("OTP login timeout — connection not established")
+            return False
         except Exception as exc:
             logger.error("OTP error: %s", exc)
             return False
