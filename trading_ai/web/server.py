@@ -321,7 +321,7 @@ def _ai_loop():
 
         if not info.get("skipped", False):
             pnl = info.get("pnl", 0.0)
-            _brain.learn(pnl, final_action, indicator_vec, ppo_action)
+            _brain.learn(pnl, final_action, indicator_vec, ppo_action, next_obs=next_obs)
 
             _trade_stats["trades"] += 1
             if pnl > 0:
@@ -352,6 +352,28 @@ def _ai_loop():
                 "total_pnl": round(_trade_stats["pnl"], 2),
                 "entry": entry,
             })
+
+        # Broadcast strategy status after each trade
+        try:
+            brain_status = _brain.get_status(ppo_agent=_agent)
+            active_strategy = brain_status.get("active_strategy", "Unknown")
+            strategy_stats  = brain_status.get("strategy_stats", [])
+            # Find win_rate of active strategy
+            strat_wr = 0.5
+            for st in strategy_stats:
+                if st["name"] == active_strategy:
+                    strat_wr = st["win_rate"]
+                    break
+            broadcast_sync({
+                "type":         "strategy",
+                "name":         active_strategy,
+                "win_rate":     round(strat_wr, 3),
+                "tips":         brain_status.get("improvement_tips", []),
+                "should_pause": brain_status.get("should_pause", False),
+                "mistakes":     brain_status.get("recent_mistakes", []),
+            })
+        except Exception as _strat_exc:
+            logger.debug("Strategy broadcast error: %s", _strat_exc)
 
         _agent.store(obs, next_obs, ppo_action, log_prob, reward, value,
                      terminated or truncated)

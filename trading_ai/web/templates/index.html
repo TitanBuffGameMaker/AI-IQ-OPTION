@@ -206,6 +206,28 @@
           </div>
         </div>
 
+        <!-- ── Strategy Status ── -->
+        <div class="brain-stat">
+          <span class="brain-stat-label">🎯 กลยุทธ์ปัจจุบัน</span>
+          <span class="brain-stat-val" id="active-strategy">-</span>
+        </div>
+        <div class="brain-stat">
+          <span class="brain-stat-label">📊 Win Rate ของกลยุทธ์</span>
+          <span class="brain-stat-val" id="strategy-win-rate">-</span>
+        </div>
+
+        <!-- Improvement tips -->
+        <div id="improvement-tips" style="margin:8px 0;padding:8px;background:var(--card);
+             border-radius:8px;font-size:11px;color:var(--text-muted);line-height:1.7;
+             min-height:24px;"></div>
+
+        <!-- Pause warning -->
+        <div id="pause-warning" style="display:none;margin:8px 0;padding:10px 12px;
+             background:rgba(242,54,69,0.15);border:1px solid var(--red);border-radius:8px;
+             font-size:12px;color:var(--red);font-weight:600;text-align:center;">
+          ⚠️ AI กำลังพักเพื่อป้องกันการขาดทุน
+        </div>
+
         <!-- ── Raw Stats ── -->
         <div class="brain-stat">
           <span class="brain-stat-label">Knowledge nodes (รากไม้)</span>

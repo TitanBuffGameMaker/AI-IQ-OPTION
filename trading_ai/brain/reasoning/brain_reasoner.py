@@ -125,8 +125,10 @@ class BrainReasoner:
         indicator_names: List[str],
         ppo_action: int,
         ppo_confidence: float,
+        strategy_signal: Optional[Tuple[int, float]] = None,
+        strategy_name: str = "",
     ) -> BrainSignal:
-        """7-layer signal fusion"""
+        """7-layer signal fusion + optional strategy signal boost"""
         reasoning: List[str] = []
         self._last_fired_nodes = []
         snapshot = self._vec_to_snapshot(indicator_vec, indicator_names)
@@ -199,6 +201,22 @@ class BrainReasoner:
             buy_score  += ppo_confidence * ppo_weight
         elif ppo_action == 2:
             sell_score += ppo_confidence * ppo_weight
+
+        # ── Strategy signal boost (weight = 2.0) ────────────────────────────
+        if strategy_signal is not None:
+            strat_action, strat_conf = strategy_signal
+            strat_weight = 2.0
+            if strat_action == 1:
+                buy_score  += strat_conf * strat_weight
+                sname = strategy_name or "Strategy"
+                reasoning.append(f"Strategy: {sname} → BUY (conf={strat_conf:.2f})")
+            elif strat_action == 2:
+                sell_score += strat_conf * strat_weight
+                sname = strategy_name or "Strategy"
+                reasoning.append(f"Strategy: {sname} → SELL (conf={strat_conf:.2f})")
+            elif strat_action == 0:
+                hold_score += strat_conf * strat_weight * 0.5
+                reasoning.append(f"Strategy: {strategy_name or 'Strategy'} → HOLD")
 
         # ── Contradiction detection ─────────────────────────────────────────
         if buy_score > 0.5 and sell_score > 0.5:

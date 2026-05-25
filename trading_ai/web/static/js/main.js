@@ -101,6 +101,10 @@ function handleMessage(msg) {
     case 'training':
       applyTraining(msg);
       break;
+
+    case 'strategy':
+      applyStrategy(msg);
+      break;
   }
 }
 
@@ -309,6 +313,37 @@ function applyBrainAge(msg) {
   document.getElementById('nav-age-emoji').textContent = emoji;
   document.getElementById('nav-age-val').textContent   = age.toFixed(0);
   document.getElementById('nav-age-stage').textContent = stage;
+}
+
+// ── Strategy status ───────────────────────────────────────────────────────────
+function applyStrategy(msg) {
+  // Update active strategy name
+  const stratEl = document.getElementById('active-strategy');
+  if (stratEl) {
+    stratEl.textContent = msg.name || '-';
+  }
+
+  // Update strategy win rate
+  const stratWrEl = document.getElementById('strategy-win-rate');
+  if (stratWrEl) {
+    const wr = (msg.win_rate || 0) * 100;
+    stratWrEl.textContent = wr.toFixed(1) + '%';
+    stratWrEl.style.color = wr >= 55 ? 'var(--green)' : wr < 45 ? 'var(--red)' : 'var(--text)';
+  }
+
+  // Update improvement tips
+  const tipsEl = document.getElementById('improvement-tips');
+  if (tipsEl && msg.tips && msg.tips.length) {
+    tipsEl.innerHTML = msg.tips
+      .map(t => `<div class="tip-item">💡 ${t}</div>`)
+      .join('');
+  }
+
+  // Show/hide pause warning
+  const pauseEl = document.getElementById('pause-warning');
+  if (pauseEl) {
+    pauseEl.style.display = msg.should_pause ? 'block' : 'none';
+  }
 }
 
 // ── Candle history (initial load from IQ Option OTC data) ─────────────────────
