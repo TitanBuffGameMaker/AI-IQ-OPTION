@@ -28,6 +28,7 @@ class IQOptionConnector:
         self.api: Optional[IQ_Option] = None
         self._connected   = False
         self._in_2fa      = False   # True ระหว่างรอ OTP — ห้าม reconnect
+        self._dead        = False   # True เมื่อ connect ล้มเหลว — หยุด auto-retry
 
     # ── Connection ─────────────────────────────────────────────────────────────
 
@@ -56,10 +57,10 @@ class IQOptionConnector:
                     reason_str = str(reason)
                     logger.error("IQ Option connection failed: %s", reason_str)
 
-                    # Rate limit — รอ 5 นาที
+                    # Rate limit — หยุด retry
                     if "number of requests" in reason_str.lower() or "exceeded" in reason_str.lower():
-                        logger.warning("Rate limited by IQ Option — waiting 5 minutes…")
-                        time.sleep(_RATE_LIMIT_WAIT)
+                        logger.warning("Rate limited — set dead flag (no auto-retry)")
+                        self._dead = True
 
                     return False, reason_str
 
@@ -123,9 +124,9 @@ class IQOptionConnector:
             return False
 
     def ensure_connected(self) -> bool:
-        """Reconnect if session dropped. Skipped during 2FA flow."""
-        if self._in_2fa:
-            return False   # ห้าม reconnect ระหว่างรอ OTP
+        """Reconnect if session dropped. Skipped during 2FA or dead state."""
+        if self._in_2fa or self._dead:
+            return False
         if not self._connected or not self.api:
             ok, _ = self.connect()
             return ok

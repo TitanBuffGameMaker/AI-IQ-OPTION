@@ -504,7 +504,14 @@ def _init_components():
     })
 
     if not connected:
-        broadcast_sync({"type":"status","message":"❌ เชื่อมต่อไม่ได้ – ตรวจสอบ .env","level":"error"})
+        if "exceeded" in reason.lower() or "number of requests" in reason.lower():
+            broadcast_sync({"type":"status",
+                "message":"⏳ IQ Option rate limit — รอ 5 นาทีแล้วรีสตาร์ทโปรแกรมใหม่",
+                "level":"error"})
+        else:
+            broadcast_sync({"type":"status",
+                "message":f"❌ เชื่อมต่อไม่ได้ ({reason}) – ตรวจสอบ email/password ใน .env",
+                "level":"error"})
         return
 
     # Startup checks
