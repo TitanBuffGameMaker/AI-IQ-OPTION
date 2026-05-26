@@ -88,6 +88,10 @@ class StartupChecker:
             logger.warning("Screen capture unavailable – skipping visual checks")
             return True, []
 
+        if not self._ocr_available:
+            logger.info("OCR (pytesseract) unavailable – skipping visual checks")
+            return True, []
+
         screenshot = self._capture_screen()
         if screenshot is None:
             logger.warning("Cannot capture screen – skipping visual checks")
@@ -247,10 +251,13 @@ class StartupChecker:
         try:
             open_time = connector.api.get_all_open_time()
             otc_assets = []
+            seen = set()
             for category in open_time.values():
                 for asset, info in category.items():
-                    if "(OTC)" in asset and info.get("open", False):
+                    # IQ Option API uses "-OTC" suffix (e.g. "EURUSD-OTC"), not "(OTC)"
+                    if "OTC" in asset.upper() and info.get("open", False) and asset not in seen:
                         otc_assets.append(asset)
+                        seen.add(asset)
 
             results.append(CheckResult(
                 name="หุ้น OTC พร้อมเทรด",

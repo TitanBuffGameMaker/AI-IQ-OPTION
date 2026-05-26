@@ -12,6 +12,7 @@ class Config:
     IQ_EMAIL:        str   = os.getenv("IQ_EMAIL", "your@email.com")
     IQ_PASSWORD:     str   = os.getenv("IQ_PASSWORD", "yourpassword")
     IQ_ACCOUNT_TYPE: str   = os.getenv("IQ_ACCOUNT_TYPE", "PRACTICE")
+    IQ_SSID:         str   = os.getenv("IQ_SSID", "")   # session token (ข้าม login)
 
     # ── Trading parameters ─────────────────────────────────────────────────
     ASSET:            str   = os.getenv("ASSET", "EURUSD")
@@ -43,7 +44,7 @@ class Config:
     # ── Risk management (ULTRA) ────────────────────────────────────────────
     MAX_CONSECUTIVE_LOSSES: int   = 5
     DAILY_LOSS_LIMIT:       float = float(os.getenv("DAILY_LOSS_LIMIT", "20.0"))
-    MIN_CONFIDENCE:         float = 0.60
+    MIN_CONFIDENCE:         float = 0.42   # ลดจาก 0.60 — brain ใหม่ต้องเริ่มเทรดก่อนเพื่อเรียนรู้
     MAX_POSITION_SIZE:      float = 2.0   # USD สูงสุด
     SHARPE_WINDOW:          int   = 20    # window สำหรับคำนวณ Sharpe reward
 

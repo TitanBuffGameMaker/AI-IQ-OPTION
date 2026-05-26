@@ -15,6 +15,7 @@ from collections import deque
 from typing import Optional, Tuple
 
 import numpy as np
+import pandas as pd
 import gymnasium as gym
 from gymnasium import spaces
 
@@ -53,11 +54,24 @@ class TradingEnv(gym.Env):
             low=-1.0, high=1.0, shape=(OBS_SIZE,), dtype=np.float32
         )
 
+        # Active asset for this env — defaults to config.ASSET but can be
+        # overridden per cycle (multi-asset trading in the AI loop).
+        self._current_asset: str = config.ASSET
+
+        # Optional callback fired right after place_trade succeeds.
+        # Signature: fn(order_id, asset, direction, amount, duration_min)
+        # Server uses this to register the trade in the live open-orders book.
+        self.on_trade_placed = None
+        # Optional callback fired when the trade result comes back.
+        # Signature: fn(order_id)
+        self.on_trade_closed = None
+
         self._balance_start:      float = 0.0
         self._consecutive_losses: int   = 0
         self._daily_pnl:          float = 0.0
         self._episode_pnl:        float = 0.0
         self._last_obs:           Optional[np.ndarray] = None
+        self._last_candles:       Optional[pd.DataFrame] = None
 
         # สำหรับ Sharpe reward
         self._reward_history: deque = deque(maxlen=config.SHARPE_WINDOW)
@@ -66,6 +80,13 @@ class TradingEnv(gym.Env):
         # สำหรับ drawdown protection
         self._peak_balance:   float = 0.0
         self._trade_count_episode: int = 0
+
+    # ── Asset rotation (for multi-asset AI loop) ────────────────────────────
+
+    def set_asset(self, asset: str) -> None:
+        """Switch the asset traded on the next step()/observation."""
+        if asset and asset != self._current_asset:
+            self._current_asset = asset
 
     # ── Gym API ─────────────────────────────────────────────────────────────
 
@@ -91,7 +112,7 @@ class TradingEnv(gym.Env):
             reward = self.HOLD_PENALTY
             info["skipped"] = True
         else:
-            if not self.connector.is_market_open(config.ASSET):
+            if not self.connector.is_market_open(self._current_asset):
                 reward = self.HOLD_PENALTY
                 info["skipped"] = True
             else:
@@ -134,8 +155,11 @@ class TradingEnv(gym.Env):
     # ── Internal helpers ─────────────────────────────────────────────────────
 
     def _execute_trade(self, direction: str) -> Tuple[float, dict]:
+        asset = self._current_asset
+        balance_before = self.connector.get_balance()
+
         success, order_id = self.connector.place_trade(
-            asset=config.ASSET,
+            asset=asset,
             direction=direction,
             amount=config.TRADE_AMOUNT,
             duration_minutes=config.TRADE_DURATION,
@@ -143,11 +167,32 @@ class TradingEnv(gym.Env):
         if not success or order_id is None:
             return self.HOLD_PENALTY, {"action": direction, "pnl": 0.0, "skipped": True}
 
+        # Notify any external listener (server.py adds to its open-orders book
+        # so the dashboard can show a live countdown).
+        if self.on_trade_placed:
+            try:
+                self.on_trade_placed(order_id, asset, direction, config.TRADE_AMOUNT,
+                                     config.TRADE_DURATION)
+            except Exception as exc:
+                logger.debug("on_trade_placed hook error: %s", exc)
+
         wait_seconds = config.TRADE_DURATION * 60 + 5
-        logger.info("Waiting %ds for trade to expire …", wait_seconds)
+        logger.info("Trade %s placed on %s — waiting %ds for expiry…", order_id, asset, wait_seconds)
         time.sleep(wait_seconds)
 
-        pnl = self.connector.get_trade_result(order_id) or 0.0
+        # Try official API first (30s), fall back to balance delta if it times out.
+        pnl_result = self.connector.get_trade_result(
+            order_id, timeout=30, balance_before=balance_before
+        )
+        if self.on_trade_closed:
+            try:
+                self.on_trade_closed(order_id)
+            except Exception as exc:
+                logger.debug("on_trade_closed hook error: %s", exc)
+        if pnl_result is None:
+            logger.warning("Trade %s: result unavailable — not counted (skipped)", order_id)
+            return 0.0, {"action": direction, "pnl": 0.0, "skipped": True}
+        pnl = pnl_result
         self._episode_pnl += pnl
         self._daily_pnl   += pnl
 
@@ -184,10 +229,11 @@ class TradingEnv(gym.Env):
 
     def _get_observation(self) -> np.ndarray:
         df = self.connector.get_candles(
-            asset=config.ASSET,
+            asset=self._current_asset,
             timeframe_seconds=config.CANDLE_TIMEFRAME,
             count=config.LOOKBACK_CANDLES + 10,
         )
+        self._last_candles = df
         if df is not None and len(df) >= 60:
             ind_vec = self.indicator_engine.compute(df)
         else:

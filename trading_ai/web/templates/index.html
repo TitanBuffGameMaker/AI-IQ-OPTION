@@ -44,6 +44,13 @@
     <span id="nav-age-stage" style="font-size:10px;color:#9e8aff;">ทารก</span>
   </div>
 
+  <!-- Market Mode badge -->
+  <div class="nav-badge" id="market-mode-badge" onclick="switchTab('settings')"
+       style="cursor:pointer;" title="คลิกเพื่อเปลี่ยน mode">
+    <span id="market-mode-icon">🎲</span>
+    <span id="market-mode-text">OTC</span>
+  </div>
+
   <div class="spacer"></div>
 
   <!-- Settings display -->
@@ -55,6 +62,102 @@
   <button id="btn-ai" onclick="toggleAI()">▶  START AI</button>
 
 </nav>
+
+<!-- ════════════════════════ LOGIN MODAL ════════════════════════ -->
+<div id="login-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.88);z-index:10000;align-items:center;justify-content:center;">
+  <div style="background:#1a1a2e;border:1px solid #2962ff;border-radius:18px;padding:28px 32px;width:430px;box-shadow:0 10px 50px rgba(41,98,255,0.3);">
+
+    <div style="font-size:30px;text-align:center;margin-bottom:6px;">🔐</div>
+    <div style="font-size:17px;font-weight:700;color:#fff;text-align:center;margin-bottom:4px;">เชื่อมต่อ IQ Option</div>
+    <div id="login-reason" style="font-size:11px;color:#f23645;text-align:center;margin-bottom:16px;padding:0 8px;"></div>
+
+    <!-- ── Tab buttons ── -->
+    <div style="display:flex;gap:8px;margin-bottom:18px;">
+      <button id="tab-btn-creds" onclick="showLoginTab('creds')"
+        style="flex:1;padding:9px;border-radius:9px;border:2px solid #2962ff;
+               background:#2962ff22;color:#5c8fff;font-size:13px;font-weight:700;cursor:pointer;">
+        🔑 Email / Password
+      </button>
+      <button id="tab-btn-ssid" onclick="showLoginTab('ssid')"
+        style="flex:1;padding:9px;border-radius:9px;border:1px solid #444;
+               background:transparent;color:#666;font-size:13px;font-weight:600;cursor:pointer;">
+        🍪 SSID Token
+      </button>
+    </div>
+
+    <!-- ── Panel: Email + Password ── -->
+    <div id="login-panel-creds">
+      <input id="login-email" type="email" placeholder="Email (iqoption)"
+        style="width:100%;padding:11px 13px;border-radius:10px;border:2px solid #2962ff;
+               background:#0d0d1a;color:#fff;font-size:13px;outline:none;
+               margin-bottom:10px;box-sizing:border-box;"
+        onkeydown="if(event.key==='Enter')document.getElementById('login-password').focus()">
+      <input id="login-password" type="password" placeholder="Password"
+        style="width:100%;padding:11px 13px;border-radius:10px;border:2px solid #2962ff;
+               background:#0d0d1a;color:#fff;font-size:13px;outline:none;
+               margin-bottom:14px;box-sizing:border-box;"
+        onkeydown="if(event.key==='Enter')submitLoginCreds()">
+      <button onclick="submitLoginCreds()"
+        style="width:100%;padding:12px;border-radius:10px;border:none;
+               background:linear-gradient(135deg,#2962ff,#00c87a);color:#fff;
+               font-size:15px;font-weight:700;cursor:pointer;letter-spacing:0.5px;">
+        เชื่อมต่อ
+      </button>
+    </div>
+
+    <!-- ── Panel: SSID Token ── -->
+    <div id="login-panel-ssid" style="display:none;">
+      <div style="background:#0d0d1a;border-radius:10px;padding:12px 14px;margin-bottom:12px;font-size:12px;color:#ccc;line-height:2;">
+        <b style="color:#00c87a;">วิธีหา SSID:</b><br>
+        1. กดปุ่มด้านล่างเพื่อเปิด IQ Option<br>
+        2. Login แล้วกด <b>F12</b> &rarr; <b>Application</b> &rarr; <b>Cookies</b><br>
+        3. หาแถว <b style="color:#ffd700;">ssid</b> &rarr; ก๊อปปี้ค่า <b>Value</b><br>
+        4. วางในช่องด้านล่าง
+      </div>
+      <button onclick="window.open('https://iqoption.com/login','_blank')"
+        style="width:100%;padding:9px;border-radius:9px;border:1px solid #00c87a;
+               background:transparent;color:#00c87a;font-size:13px;font-weight:600;
+               cursor:pointer;margin-bottom:10px;">
+        🔗 เปิด IQ Option Login
+      </button>
+      <input id="ssid-input" type="text" placeholder="วาง SSID ที่นี่…"
+        style="width:100%;padding:11px 13px;border-radius:10px;border:2px solid #00c87a;
+               background:#0d0d1a;color:#fff;font-size:13px;outline:none;
+               margin-bottom:10px;box-sizing:border-box;"
+        onkeydown="if(event.key==='Enter')submitSSID()">
+      <button onclick="submitSSID()"
+        style="width:100%;padding:12px;border-radius:10px;border:none;
+               background:linear-gradient(135deg,#00c87a,#2962ff);color:#fff;
+               font-size:15px;font-weight:700;cursor:pointer;">
+        เชื่อมต่อด้วย SSID
+      </button>
+    </div>
+
+    <div id="login-error" style="color:#f23645;font-size:12px;margin-top:10px;display:none;text-align:center;"></div>
+  </div>
+</div>
+
+<!-- ════════════════════════ OTP MODAL ═════════════════════════ -->
+<div id="otp-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.75);z-index:9999;display:none;align-items:center;justify-content:center;">
+  <div style="background:#1a1a2e;border:1px solid #7c4dff;border-radius:16px;padding:32px 36px;width:320px;text-align:center;box-shadow:0 8px 40px rgba(124,77,255,0.3);">
+    <div style="font-size:36px;margin-bottom:8px;">🔐</div>
+    <div style="font-size:18px;font-weight:700;color:#fff;margin-bottom:6px;">ยืนยัน 2FA</div>
+    <div style="font-size:13px;color:#9e8aff;margin-bottom:20px;" id="otp-msg">กรุณากรอก OTP 5 หลักจาก SMS หรือ Email</div>
+    <input id="otp-input" type="text" maxlength="5" inputmode="numeric" pattern="[0-9]*"
+      placeholder="_ _ _ _ _"
+      style="width:100%;text-align:center;font-size:28px;letter-spacing:10px;font-weight:700;
+             padding:12px;border-radius:10px;border:2px solid #7c4dff;background:#0d0d1a;
+             color:#fff;outline:none;margin-bottom:16px;box-sizing:border-box;"
+      onkeydown="if(event.key==='Enter')submitOTP()">
+    <button onclick="submitOTP()"
+      style="width:100%;padding:12px;border-radius:10px;border:none;
+             background:linear-gradient(135deg,#7c4dff,#2962ff);color:#fff;
+             font-size:15px;font-weight:700;cursor:pointer;">
+      ยืนยัน OTP
+    </button>
+    <div id="otp-error" style="color:#f23645;font-size:12px;margin-top:10px;display:none;">OTP ไม่ถูกต้อง กรุณาลองใหม่</div>
+  </div>
+</div>
 
 <!-- ════════════════════════ CHECK BANNER ══════════════════════ -->
 <div id="check-banner">
@@ -72,7 +175,7 @@
       'EUR/USD (OTC)',
       'GBP/USD (OTC)',
       'AUD/USD (OTC)',
-      'GBP/JPY (OTC)'
+      'EUR/JPY (OTC)'
     ] %}
 
     {% for asset in assets %}
@@ -124,9 +227,10 @@
   <aside id="sidebar">
 
     <div class="sidebar-tabs">
-      <div class="sidebar-tab active" data-tab="brain" onclick="switchTab('brain')">🧠 Brain</div>
-      <div class="sidebar-tab" data-tab="history"      onclick="switchTab('history')">📋 History</div>
-      <div class="sidebar-tab" data-tab="settings"     onclick="switchTab('settings')">⚙️ Settings</div>
+      <div class="sidebar-tab active" data-tab="brain"    onclick="switchTab('brain')">🧠 Brain</div>
+      <div class="sidebar-tab" data-tab="history"         onclick="switchTab('history')">📋 History</div>
+      <div class="sidebar-tab" data-tab="settings"        onclick="switchTab('settings')">⚙️ Settings</div>
+      <div class="sidebar-tab" data-tab="logs" id="tab-btn-logs" onclick="switchTab('logs')">📝 Logs<span class="log-badge-count">0</span></div>
     </div>
 
     <div class="sidebar-content">
@@ -206,6 +310,93 @@
           </div>
         </div>
 
+        <!-- ── Strategy Status ── -->
+        <div class="brain-stat">
+          <span class="brain-stat-label">🎯 กลยุทธ์ปัจจุบัน</span>
+          <span class="brain-stat-val" id="active-strategy">-</span>
+        </div>
+        <div class="brain-stat">
+          <span class="brain-stat-label">📊 Win Rate ของกลยุทธ์</span>
+          <span class="brain-stat-val" id="strategy-win-rate">-</span>
+        </div>
+
+        <!-- Improvement tips -->
+        <div id="improvement-tips" style="margin:8px 0;padding:8px;background:var(--card);
+             border-radius:8px;font-size:11px;color:var(--text-muted);line-height:1.7;
+             min-height:24px;"></div>
+
+        <!-- Pause warning -->
+        <div id="pause-warning" style="display:none;margin:8px 0;padding:10px 12px;
+             background:rgba(242,54,69,0.15);border:1px solid var(--red);border-radius:8px;
+             font-size:12px;color:var(--red);font-weight:600;text-align:center;">
+          ⚠️ AI กำลังพักเพื่อป้องกันการขาดทุน
+        </div>
+
+        <!-- ══ Capital Guard Panel (แสดงเฉพาะ REAL account) ══ -->
+        <div id="capital-guard-panel" style="display:none;margin:10px 0 4px;">
+          <div class="cg-header">
+            <span>🛡️ Capital Protection</span>
+            <span class="cg-badge" id="cg-badge">REAL</span>
+          </div>
+
+          <!-- Daily P&L -->
+          <div class="cg-row">
+            <span class="cg-label">P&L วันนี้</span>
+            <span class="cg-value" id="cg-daily-pnl">$0.00</span>
+          </div>
+          <div class="cg-row">
+            <span class="cg-label">Kelly Bet</span>
+            <span class="cg-value" id="cg-kelly-amount">$–</span>
+          </div>
+          <div class="cg-row">
+            <span class="cg-label">Min Confidence</span>
+            <span class="cg-value" id="cg-min-conf">55%</span>
+          </div>
+
+          <!-- Progress bars -->
+          <div class="cg-bars">
+            <!-- Profit target bar (green, fills right) -->
+            <div class="cg-bar-label">
+              <span>กำไร</span>
+              <span id="cg-profit-pct-text">0%</span>
+              <span style="margin-left:auto;color:var(--green);font-size:10px;">เป้า <span id="cg-target-pct">10%</span></span>
+            </div>
+            <div class="cg-track">
+              <div class="cg-fill profit" id="cg-profit-bar" style="width:0%"></div>
+              <div class="cg-target-line" id="cg-target-line"></div>
+            </div>
+
+            <!-- Loss limit bar (red, fills right) -->
+            <div class="cg-bar-label" style="margin-top:6px;">
+              <span>ขาดทุน</span>
+              <span id="cg-loss-pct-text">0%</span>
+              <span style="margin-left:auto;color:var(--red);font-size:10px;">ขีดจำกัด <span id="cg-limit-pct">20%</span></span>
+            </div>
+            <div class="cg-track">
+              <div class="cg-fill loss" id="cg-loss-bar" style="width:0%"></div>
+            </div>
+          </div>
+
+          <!-- Stop banner -->
+          <div id="cg-stop-banner" style="display:none;margin-top:8px;padding:8px 12px;
+               border-radius:8px;font-size:11px;font-weight:600;text-align:center;
+               background:rgba(242,54,69,0.2);border:1px solid var(--red);color:var(--red);">
+            <span id="cg-stop-reason">–</span>
+          </div>
+
+          <!-- Settings row -->
+          <div class="cg-settings-row">
+            <label class="cg-label">Loss Limit %</label>
+            <input type="number" id="cg-loss-limit-input" class="cg-input"
+                   min="5" max="50" step="1" value="20"
+                   onchange="sendCapitalGuardSettings()">
+            <label class="cg-label" style="margin-left:10px;">Target %</label>
+            <input type="number" id="cg-target-input" class="cg-input"
+                   min="5" max="50" step="1" value="10"
+                   onchange="sendCapitalGuardSettings()">
+          </div>
+        </div>
+
         <!-- ── Raw Stats ── -->
         <div class="brain-stat">
           <span class="brain-stat-label">Knowledge nodes (รากไม้)</span>
@@ -243,14 +434,49 @@
 
       <!-- Trade history panel -->
       <div id="tab-history" class="tab-panel">
-        <div id="trade-list"></div>
-        <div id="empty-history" style="text-align:center;color:var(--text-muted);padding:24px;font-size:12px;">
-          ยังไม่มีประวัติการเทรด
+
+        <!-- ── Active (open) orders ── -->
+        <div class="trade-section">
+          <div class="trade-section-header">
+            <span class="dot live"></span>
+            <span>ออเดอร์ที่เปิดอยู่</span>
+            <span class="trade-count" id="active-count">0</span>
+          </div>
+          <div id="active-list"></div>
+          <div id="empty-active" class="empty-msg">— ไม่มีออเดอร์ที่เปิด —</div>
         </div>
+
+        <!-- ── Closed orders ── -->
+        <div class="trade-section">
+          <div class="trade-section-header">
+            <span class="dot closed"></span>
+            <span>ออเดอร์ที่ปิดแล้ว</span>
+            <span class="trade-count" id="closed-count">0</span>
+          </div>
+          <div id="trade-list"></div>
+          <div id="empty-history" class="empty-msg">ยังไม่มีประวัติการเทรด</div>
+        </div>
+
       </div>
 
       <!-- Settings panel -->
       <div id="tab-settings" class="tab-panel">
+
+        <!-- ── Market Mode Toggle ── -->
+        <div class="mode-section">
+          <div class="mode-section-title">🌐 Market Mode</div>
+          <div class="mode-toggle-group">
+            <button id="btn-mode-otc"  class="mode-btn active" onclick="setMarketMode('OTC')">
+              🎲 OTC (Synthetic)
+            </button>
+            <button id="btn-mode-real" class="mode-btn"        onclick="setMarketMode('REAL')">
+              📈 Real Market
+            </button>
+          </div>
+          <div class="mode-desc" id="mode-desc">
+            Pattern learning — news &amp; calendar disabled (OTC ไม่เกี่ยวกับข่าว)
+          </div>
+        </div>
 
         <div class="form-group">
           <label class="form-label">กรอบเวลาแท่งเทียน (Timeframe)</label>
@@ -300,6 +526,23 @@
           ⚠️ เปลี่ยน PRACTICE → REAL เฉพาะตอน AI พิสูจน์แล้วว่า win rate &gt; 60%<br>
           🔴 ตั้ง Daily loss limit ใน .env ก่อนใช้เงินจริง
         </div>
+
+      </div>
+
+      <!-- ── Logs panel ── -->
+      <div id="tab-logs" class="tab-panel log-panel-wrap">
+
+        <div class="log-toolbar">
+          <div class="log-filters">
+            <button class="log-filter-btn active" data-lvl="all"   onclick="setLogFilter('all')">ทั้งหมด</button>
+            <button class="log-filter-btn"         data-lvl="info"  onclick="setLogFilter('info')">INFO</button>
+            <button class="log-filter-btn warn"    data-lvl="warn"  onclick="setLogFilter('warn')">WARN</button>
+            <button class="log-filter-btn error"   data-lvl="error" onclick="setLogFilter('error')">ERR</button>
+          </div>
+          <button class="log-clear-btn" onclick="clearLogs()" title="ลบ log ทั้งหมด">🗑</button>
+        </div>
+
+        <div id="log-list" class="log-list"></div>
 
       </div>
 

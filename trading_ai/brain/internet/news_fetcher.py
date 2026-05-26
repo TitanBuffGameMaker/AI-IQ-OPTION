@@ -123,9 +123,9 @@ class NewsFetcher:
         return [a for a in self.fetch() if a.relevance_score >= min_relevance]
 
     def has_high_impact_news(self) -> bool:
-        """Check if there's any high-impact news in the last 2 hours."""
+        """True only when a high-impact article is also relevant to the current asset."""
         recent = self.fetch()
-        return any(a.is_high_impact for a in recent)
+        return any(a.is_high_impact and a.relevance_score >= 0.3 for a in recent)
 
     def get_sentiment_for_asset(self) -> float:
         """

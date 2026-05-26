@@ -21,6 +21,10 @@ class NodeType(str, Enum):
     EXPERIENCE = "experience"    # outcome of a real trade
     SENTIMENT = "sentiment"      # market mood / bias at a point in time
     HYPOTHESIS = "hypothesis"    # AI's own conjecture, unconfirmed
+    TECHNIQUE = "technique"      # indicator-based technique (RSI divergence, MACD cross)
+    STRATEGY_CONCEPT = "strategy_concept"  # higher-level strategy (mean reversion, breakout)
+    RISK_CONCEPT = "risk_concept"  # risk-management idea (position sizing, drawdown)
+    PSYCHOLOGY = "psychology"    # trader-psychology insight (fear/greed, discipline)
 
 
 class EdgeType(str, Enum):

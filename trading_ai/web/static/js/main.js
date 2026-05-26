@@ -10,7 +10,7 @@ const OTC_ASSETS = [
   'EUR/USD (OTC)',
   'GBP/USD (OTC)',
   'AUD/USD (OTC)',
-  'GBP/JPY (OTC)',
+  'EUR/JPY (OTC)',
 ];
 
 // ── State ─────────────────────────────────────────────────────────────────────
@@ -94,6 +94,24 @@ function handleMessage(msg) {
       applyTrade(msg);
       break;
 
+    case 'open_trade':
+      if (msg.entry) addActiveOrder(msg.entry);
+      break;
+
+    case 'close_trade':
+      if (msg.order_id != null) removeActiveOrder(msg.order_id);
+      break;
+
+    case 'stats_update':
+      updateStats(msg.stats || {});
+      if (msg.history && msg.history.length) {
+        document.getElementById('trade-list').innerHTML = '';
+        const empty = document.getElementById('empty-history');
+        if (empty) empty.style.display = 'none';
+        msg.history.forEach(addTradeToHistory);
+      }
+      break;
+
     case 'status':
       setStatus(msg.message, msg.level || 'info');
       break;
@@ -101,7 +119,134 @@ function handleMessage(msg) {
     case 'training':
       applyTraining(msg);
       break;
+
+    case 'strategy':
+      applyStrategy(msg);
+      break;
+
+    case 'market_mode':
+      if (msg.mode) _applyMarketModeUI(msg.mode);
+      break;
+
+    case 'capital_guard':
+      applyCapitalGuard(msg);
+      break;
+
+    case 'log':
+      addLogEntry(msg);
+      break;
+
+    case 'log_history':
+      if (Array.isArray(msg.entries)) {
+        msg.entries.forEach(e => addLogEntry(e, /*batch=*/true));
+        const ll = document.getElementById('log-list');
+        if (ll) ll.scrollTop = ll.scrollHeight;
+      }
+      break;
+
+    case 'otp_required':
+      showOTPModal(msg.message);
+      break;
+
+    case 'ssid_required':        // legacy — redirect to new modal
+    case 'login_required':
+      showLoginModal(msg.reason || msg.message || '');
+      break;
   }
+}
+
+// ── Login Modal (Email/Password + SSID) ───────────────────────────────────────
+function showLoginModal(reason) {
+  const overlay = document.getElementById('login-overlay');
+  if (!overlay) return;
+  const reasonEl = document.getElementById('login-reason');
+  if (reasonEl && reason) {
+    // Show human-readable hint based on error content
+    if (reason.toLowerCase().includes('exceeded') || reason.toLowerCase().includes('number of requests')) {
+      reasonEl.textContent = '⏳ IQ Option บล็อก login ชั่วคราว — ลอง SSID Token แทน';
+    } else if (reason.toLowerCase().includes('10060') || reason.toLowerCase().includes('timed out')) {
+      reasonEl.textContent = '🌐 เชื่อมต่อเซิร์ฟเวอร์ไม่ได้ — ตรวจสอบ internet หรือลอง login ใหม่';
+    } else if (reason) {
+      reasonEl.textContent = reason.substring(0, 120);
+    }
+  }
+  document.getElementById('login-error').style.display = 'none';
+  showLoginTab('creds');   // default to email/password tab
+  overlay.style.display = 'flex';
+  setTimeout(() => document.getElementById('login-email').focus(), 150);
+}
+
+function showLoginTab(tab) {
+  const isCreds = tab === 'creds';
+  document.getElementById('login-panel-creds').style.display = isCreds ? 'block' : 'none';
+  document.getElementById('login-panel-ssid').style.display  = isCreds ? 'none'  : 'block';
+
+  const btnC = document.getElementById('tab-btn-creds');
+  const btnS = document.getElementById('tab-btn-ssid');
+  if (isCreds) {
+    btnC.style.cssText += ';border:2px solid #2962ff;background:#2962ff22;color:#5c8fff;';
+    btnS.style.cssText += ';border:1px solid #444;background:transparent;color:#666;';
+    setTimeout(() => document.getElementById('login-email').focus(), 80);
+  } else {
+    btnS.style.cssText += ';border:2px solid #00c87a;background:#00c87a22;color:#00c87a;';
+    btnC.style.cssText += ';border:1px solid #444;background:transparent;color:#666;';
+    setTimeout(() => document.getElementById('ssid-input').focus(), 80);
+  }
+}
+
+function submitLoginCreds() {
+  const email    = (document.getElementById('login-email').value    || '').trim();
+  const password = (document.getElementById('login-password').value || '').trim();
+  const errEl    = document.getElementById('login-error');
+  if (!email || !email.includes('@')) {
+    errEl.textContent = 'กรุณากรอก Email ให้ถูกต้อง';
+    errEl.style.display = 'block';
+    return;
+  }
+  if (!password) {
+    errEl.textContent = 'กรุณากรอก Password';
+    errEl.style.display = 'block';
+    return;
+  }
+  send({ type: 'credentials', email, password });
+  document.getElementById('login-overlay').style.display = 'none';
+  setStatus('กำลังเชื่อมต่อ…', 'info');
+}
+
+function submitSSID() {
+  const ssid  = (document.getElementById('ssid-input').value || '').trim();
+  const errEl = document.getElementById('login-error');
+  if (!ssid || ssid.length < 10) {
+    errEl.textContent = 'SSID ไม่ถูกต้อง (ต้องยาวกว่า 10 ตัวอักษร)';
+    errEl.style.display = 'block';
+    return;
+  }
+  send({ type: 'otp', code: ssid });
+  document.getElementById('login-overlay').style.display = 'none';
+  setStatus('กำลังเชื่อมต่อด้วย SSID…', 'info');
+}
+
+// ── OTP Modal ─────────────────────────────────────────────────────────────────
+function showOTPModal(message) {
+  const overlay = document.getElementById('otp-overlay');
+  if (!overlay) return;
+  if (message) document.getElementById('otp-msg').textContent = message;
+  document.getElementById('otp-error').style.display = 'none';
+  document.getElementById('otp-input').value = '';
+  overlay.style.display = 'flex';
+  setTimeout(() => document.getElementById('otp-input').focus(), 100);
+}
+
+function submitOTP() {
+  const code = document.getElementById('otp-input').value.trim();
+  if (code.length !== 5 || !/^\d+$/.test(code)) {
+    document.getElementById('otp-error').style.display = 'block';
+    document.getElementById('otp-error').textContent = 'OTP ต้องเป็นตัวเลข 5 หลัก';
+    return;
+  }
+  send({ type: 'otp', code });
+  document.getElementById('otp-overlay').style.display = 'none';
+  setStatus('ส่ง OTP แล้ว กำลังยืนยัน…', 'info');
 }
 
 function applyTraining(msg) {
@@ -119,12 +264,24 @@ function applyTraining(msg) {
 
 // ── Apply functions ───────────────────────────────────────────────────────────
 function applyInit(msg) {
-  applyConnection({ connected: msg.connected, balance: msg.balance, account: '' });
+  applyConnection({ connected: msg.connected, balance: msg.balance, account: msg.account || '' });
   updateStats(msg.stats || {});
-  if (msg.checks && msg.checks.length) applyChecks({ results: msg.checks });
-  (msg.history || []).forEach(addTradeToHistory);
+  if (msg.checks && msg.checks.length) {
+    applyChecks({ results: msg.checks, all_passed: !!msg.all_passed });
+  }
+  const history = msg.history || [];
+  if (history.length === 0) {
+    const empty = document.getElementById('empty-history');
+    if (empty) empty.style.display = '';
+  } else {
+    history.forEach(addTradeToHistory);
+  }
+  // Replay any orders that were already open when this client connected
+  (msg.open_orders || []).forEach(addActiveOrder);
   applySettings(msg.settings || {});
   setAiState(msg.ai_running || false);
+  _applyMarketModeUI(msg.market_mode || 'OTC');
+  if (msg.capital_guard) applyCapitalGuard(msg.capital_guard);
 }
 
 function applyConnection(msg) {
@@ -311,6 +468,37 @@ function applyBrainAge(msg) {
   document.getElementById('nav-age-stage').textContent = stage;
 }
 
+// ── Strategy status ───────────────────────────────────────────────────────────
+function applyStrategy(msg) {
+  // Update active strategy name
+  const stratEl = document.getElementById('active-strategy');
+  if (stratEl) {
+    stratEl.textContent = msg.name || '-';
+  }
+
+  // Update strategy win rate
+  const stratWrEl = document.getElementById('strategy-win-rate');
+  if (stratWrEl) {
+    const wr = (msg.win_rate || 0) * 100;
+    stratWrEl.textContent = wr.toFixed(1) + '%';
+    stratWrEl.style.color = wr >= 55 ? 'var(--green)' : wr < 45 ? 'var(--red)' : 'var(--text)';
+  }
+
+  // Update improvement tips
+  const tipsEl = document.getElementById('improvement-tips');
+  if (tipsEl && msg.tips && msg.tips.length) {
+    tipsEl.innerHTML = msg.tips
+      .map(t => `<div class="tip-item">💡 ${t}</div>`)
+      .join('');
+  }
+
+  // Show/hide pause warning
+  const pauseEl = document.getElementById('pause-warning');
+  if (pauseEl) {
+    pauseEl.style.display = msg.should_pause ? 'block' : 'none';
+  }
+}
+
 // ── Candle history (initial load from IQ Option OTC data) ─────────────────────
 function applyCandleHistory(msg) {
   const data = msg.data || {};
@@ -359,7 +547,9 @@ function updateStats(s) {
 
 // ── Trade history ─────────────────────────────────────────────────────────────
 function addTradeToHistory(entry) {
-  const list = document.getElementById('trade-list');
+  const list  = document.getElementById('trade-list');
+  const empty = document.getElementById('empty-history');
+  if (empty) empty.style.display = 'none';
   const item = document.createElement('div');
   item.className = `trade-item ${entry.win ? 'win' : 'loss'}`;
   const sign = entry.pnl >= 0 ? '+' : '';
@@ -373,7 +563,96 @@ function addTradeToHistory(entry) {
 
   // Keep max 50 items
   while (list.children.length > 50) list.removeChild(list.lastChild);
+  updateClosedCount();
 }
+
+function updateClosedCount() {
+  const list  = document.getElementById('trade-list');
+  const count = document.getElementById('closed-count');
+  if (count && list) count.textContent = list.children.length;
+}
+
+// ── Active orders (open positions with live countdown) ────────────────────────
+const _activeOrders = new Map();   // order_id → {entry, el}
+
+function addActiveOrder(entry) {
+  if (!entry || entry.order_id == null) return;
+  const list = document.getElementById('active-list');
+  const oid  = entry.order_id;
+  if (_activeOrders.has(oid)) return;   // already shown
+
+  const action = (entry.action || '').toUpperCase();
+  const cls    = action === 'BUY' || action === 'CALL' ? 'buy'  :
+                 action === 'SELL'|| action === 'PUT'  ? 'sell' : '';
+  const arrow  = cls === 'buy' ? '▲' : cls === 'sell' ? '▼' : '•';
+  const tag    = entry.manual ? '🖐 Manual' : '🤖 AI';
+
+  const el = document.createElement('div');
+  el.className   = `active-order ${cls}`;
+  el.dataset.oid = String(oid);
+  el.innerHTML = `
+    <span class="ao-time">${entry.open_time || '--:--'}</span>
+    <span class="ao-main">
+      <span class="ao-asset">${(entry.asset || '').replace(' (OTC)', '')} <span class="ao-action ${cls}">${arrow} ${action}</span></span>
+      <span class="ao-info">$${(entry.amount ?? 0).toFixed(2)} · ${tag}</span>
+    </span>
+    <span class="ao-countdown" data-expiry="${entry.expiry_ts || 0}">
+      <span class="ao-cd-main">--:--</span>
+      <span class="ao-cd-sub">เหลือ</span>
+    </span>
+  `;
+  list.insertBefore(el, list.firstChild);
+  _activeOrders.set(oid, { entry, el });
+
+  const empty = document.getElementById('empty-active');
+  if (empty) empty.style.display = 'none';
+  updateActiveCount();
+  tickCountdown(el);  // first paint immediately
+}
+
+function removeActiveOrder(oid) {
+  if (oid == null) return;
+  const rec = _activeOrders.get(oid);
+  if (!rec) return;
+  rec.el.remove();
+  _activeOrders.delete(oid);
+  if (_activeOrders.size === 0) {
+    const empty = document.getElementById('empty-active');
+    if (empty) empty.style.display = '';
+  }
+  updateActiveCount();
+}
+
+function updateActiveCount() {
+  const c = document.getElementById('active-count');
+  if (c) c.textContent = _activeOrders.size;
+}
+
+function tickCountdown(el) {
+  const cd   = el.querySelector('.ao-countdown');
+  if (!cd) return;
+  const exp  = parseFloat(cd.dataset.expiry) || 0;
+  const left = Math.floor(exp - Date.now() / 1000);
+  const main = cd.querySelector('.ao-cd-main');
+  const sub  = cd.querySelector('.ao-cd-sub');
+  if (left > 0) {
+    const m = Math.floor(left / 60), s = left % 60;
+    main.textContent = `${m.toString().padStart(2,'0')}:${s.toString().padStart(2,'0')}`;
+    sub.textContent  = 'เหลือ';
+    el.classList.remove('expired');
+  } else {
+    main.textContent = '⏳';
+    sub.textContent  = 'กำลังรอผล…';
+    el.classList.add('expired');
+  }
+}
+
+// One global tick loop for all active orders
+setInterval(() => {
+  _activeOrders.forEach(rec => tickCountdown(rec.el));
+}, 1000);
+
+
 
 // ── Settings ──────────────────────────────────────────────────────────────────
 function applySettings(s) {
@@ -394,6 +673,106 @@ function saveSettings() {
   send({ type: 'settings', timeframe: tf, duration: dur, amount: parseFloat(amt) });
   updateSettingsBadge(tf, dur);
   showToast('Settings saved', 'success');
+}
+
+// ── Market Mode toggle ────────────────────────────────────────────────────────
+function setMarketMode(mode) {
+  send({ type: 'settings', market_mode: mode });
+  _applyMarketModeUI(mode);
+}
+
+function _applyMarketModeUI(mode) {
+  const otcBtn  = document.getElementById('btn-mode-otc');
+  const realBtn = document.getElementById('btn-mode-real');
+  const desc    = document.getElementById('mode-desc');
+  const badge   = document.getElementById('market-mode-badge');
+  const icon    = document.getElementById('market-mode-icon');
+  const text    = document.getElementById('market-mode-text');
+
+  if (!otcBtn) return;
+
+  if (mode === 'OTC') {
+    otcBtn.className  = 'mode-btn active otc';
+    realBtn.className = 'mode-btn';
+    desc.textContent  = '🎲 OTC — pattern learning, news/calendar disabled (OTC ไม่เกี่ยวกับข่าว)';
+    if (badge) { badge.className = 'nav-badge otc'; icon.textContent = '🎲'; text.textContent = 'OTC'; }
+  } else {
+    otcBtn.className  = 'mode-btn';
+    realBtn.className = 'mode-btn active real';
+    desc.textContent  = '📈 Real Market — news, calendar, sentiment active (ดูแนวโน้มตลาดจริง)';
+    if (badge) { badge.className = 'nav-badge real'; icon.textContent = '📈'; text.textContent = 'Real'; }
+  }
+}
+
+// ── Capital Guard ─────────────────────────────────────────────────────────────
+function applyCapitalGuard(msg) {
+  const panel = document.getElementById('capital-guard-panel');
+  if (!panel) return;
+
+  const isReal = (msg.account_type === 'REAL');
+  panel.style.display = isReal ? 'block' : 'none';
+  if (!isReal) return;
+
+  // Daily P&L
+  const pnl = msg.session_pnl || 0;
+  const pnlEl = document.getElementById('cg-daily-pnl');
+  if (pnlEl) {
+    pnlEl.textContent = (pnl >= 0 ? '+' : '') + '$' + pnl.toFixed(2);
+    pnlEl.style.color = pnl >= 0 ? 'var(--green)' : 'var(--red)';
+  }
+
+  // Kelly bet
+  const kellyEl = document.getElementById('cg-kelly-amount');
+  if (kellyEl && msg.kelly_amount > 0) kellyEl.textContent = '$' + msg.kelly_amount.toFixed(2);
+
+  // Min confidence (derived from account type label — will be updated via signal messages)
+  // Profit bar
+  const profitPct = Math.min((msg.profit_pct || 0) / (msg.profit_target || 0.10), 1) * 100;
+  const profitBar = document.getElementById('cg-profit-bar');
+  const profitTxt = document.getElementById('cg-profit-pct-text');
+  if (profitBar) profitBar.style.width = profitPct.toFixed(1) + '%';
+  if (profitTxt) profitTxt.textContent = ((msg.profit_pct || 0) * 100).toFixed(1) + '%';
+
+  // Target line position
+  const targetLine = document.getElementById('cg-target-line');
+  if (targetLine) targetLine.style.left = '100%';   // at 100% of bar = target
+
+  // Loss bar
+  const lossPct = Math.min((msg.loss_pct || 0) / (msg.daily_loss_limit || 0.20), 1) * 100;
+  const lossBar = document.getElementById('cg-loss-bar');
+  const lossTxt = document.getElementById('cg-loss-pct-text');
+  if (lossBar) lossBar.style.width = lossPct.toFixed(1) + '%';
+  if (lossTxt) lossTxt.textContent = ((msg.loss_pct || 0) * 100).toFixed(1) + '%';
+
+  // Labels
+  const targetPctEl = document.getElementById('cg-target-pct');
+  const limitPctEl  = document.getElementById('cg-limit-pct');
+  if (targetPctEl) targetPctEl.textContent = ((msg.profit_target || 0.10) * 100).toFixed(0) + '%';
+  if (limitPctEl)  limitPctEl.textContent  = ((msg.daily_loss_limit || 0.20) * 100).toFixed(0) + '%';
+
+  // Stop banner
+  const stopBanner = document.getElementById('cg-stop-banner');
+  const stopReason = document.getElementById('cg-stop-reason');
+  if (stopBanner && stopReason) {
+    stopBanner.style.display = msg.stopped ? 'block' : 'none';
+    stopReason.textContent   = msg.stop_reason || '';
+  }
+
+  // Input sync
+  const lossInput   = document.getElementById('cg-loss-limit-input');
+  const targetInput = document.getElementById('cg-target-input');
+  if (lossInput && msg.daily_loss_limit) lossInput.value = Math.round(msg.daily_loss_limit * 100);
+  if (targetInput && msg.profit_target)  targetInput.value = Math.round(msg.profit_target * 100);
+}
+
+function sendCapitalGuardSettings() {
+  const lossInput   = document.getElementById('cg-loss-limit-input');
+  const targetInput = document.getElementById('cg-target-input');
+  send({
+    type:               'settings',
+    loss_limit_pct:     (parseInt(lossInput?.value || 20) / 100),
+    profit_target_pct:  (parseInt(targetInput?.value || 10) / 100),
+  });
 }
 
 // ── AI toggle ─────────────────────────────────────────────────────────────────
@@ -422,6 +801,73 @@ function switchTab(name) {
   document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
   document.querySelector(`[data-tab="${name}"]`).classList.add('active');
   document.getElementById(`tab-${name}`).classList.add('active');
+  // Clear unread badge when user opens logs tab
+  if (name === 'logs') {
+    const badge = document.querySelector('#tab-btn-logs .log-badge-count');
+    if (badge) { badge.style.display = 'none'; badge.textContent = '0'; }
+    _logUnread = 0;
+    // Scroll to bottom
+    const ll = document.getElementById('log-list');
+    if (ll) ll.scrollTop = ll.scrollHeight;
+  }
+}
+
+// ── Live Logs ─────────────────────────────────────────────────────────────────
+let _logFilter  = 'all';
+let _logUnread  = 0;
+const _LOG_MAX  = 300;     // max entries to keep in DOM
+
+function setLogFilter(lvl) {
+  _logFilter = lvl;
+  document.querySelectorAll('.log-filter-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.lvl === lvl);
+  });
+  // Show/hide existing entries
+  document.querySelectorAll('#log-list .log-entry').forEach(el => {
+    el.style.display = (lvl === 'all' || el.dataset.lvl === lvl) ? '' : 'none';
+  });
+}
+
+function clearLogs() {
+  const ll = document.getElementById('log-list');
+  if (ll) ll.innerHTML = '';
+  _logUnread = 0;
+  const badge = document.querySelector('#tab-btn-logs .log-badge-count');
+  if (badge) { badge.style.display = 'none'; badge.textContent = '0'; }
+}
+
+function addLogEntry(entry, batch) {
+  const ll = document.getElementById('log-list');
+  if (!ll) return;
+
+  const lvl  = entry.level || 'info';
+  const show = (_logFilter === 'all' || _logFilter === lvl);
+  const row  = document.createElement('div');
+  row.className = `log-entry ${lvl}`;
+  row.dataset.lvl = lvl;
+  row.style.display = show ? '' : 'none';
+  row.innerHTML =
+    `<span class="log-time">${entry.time || ''}</span>` +
+    `<span class="log-badge">${lvl.toUpperCase()}</span>` +
+    `<span class="log-msg">[${entry.name || ''}] ${entry.message || ''}</span>`;
+  ll.appendChild(row);
+
+  // Trim old entries
+  while (ll.children.length > _LOG_MAX) ll.removeChild(ll.firstChild);
+
+  // Auto-scroll only if we're within 60px of bottom
+  if (!batch) {
+    const atBottom = ll.scrollHeight - ll.scrollTop - ll.clientHeight < 60;
+    if (atBottom) ll.scrollTop = ll.scrollHeight;
+
+    // Unread badge when logs tab is NOT active
+    const logsTabActive = document.getElementById('tab-logs')?.classList.contains('active');
+    if (!logsTabActive && (lvl === 'warn' || lvl === 'error')) {
+      _logUnread++;
+      const badge = document.querySelector('#tab-btn-logs .log-badge-count');
+      if (badge) { badge.style.display = 'inline-block'; badge.textContent = _logUnread; }
+    }
+  }
 }
 
 // ── Checks modal ──────────────────────────────────────────────────────────────

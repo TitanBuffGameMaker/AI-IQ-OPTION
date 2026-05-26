@@ -1,11 +1,15 @@
 """
-BrainCore — ULTRA EDITION
+BrainCore — ULTRA EDITION (Living Brain)
 
 เพิ่ม:
   - INDICATOR_NAMES สำหรับ 40 features
   - Market regime tracking
   - Performance analytics
   - Indicator reliability tracking
+  - WorkingMemory — จำ 20 trades ล่าสุด
+  - StrategyLibrary — คลังกลยุทธ์ 5 แบบ
+  - SelfReflectionEngine — วิเคราะห์ทุกไม้หลังปิด
+  - FastLearner — Online A3C update ทุกไม้ทันที
 """
 import logging
 import threading
@@ -21,7 +25,13 @@ from trading_ai.brain.memory.episodic import EpisodicMemory
 from trading_ai.brain.internet.news_fetcher import NewsFetcher
 from trading_ai.brain.internet.economic_calendar import EconomicCalendar
 from trading_ai.brain.internet.web_researcher import WebResearcher
+from trading_ai.brain.internet.knowledge_researcher import KnowledgeResearcher
+from trading_ai.brain.memory.pattern_memory import CandlePatternMemory
 from trading_ai.brain.reasoning.brain_reasoner import BrainReasoner, BrainSignal
+from trading_ai.brain.working_memory import WorkingMemory
+from trading_ai.brain.strategy_library import StrategyLibrary
+from trading_ai.brain.self_reflection import SelfReflectionEngine
+from trading_ai.models.fast_learner import FastLearner
 from trading_ai.config import config
 
 logger = logging.getLogger(__name__)
@@ -48,26 +58,33 @@ INDICATOR_NAMES = [
     "volatility_regime",
 ]
 
+OBS_SIZE = 296  # 40 indicators + 256 CNN features
+
 
 class BrainCore:
     """
     ULTRA Brain — orchestrates all AI subsystems
     """
 
-    INTERNET_REFRESH_INTERVAL = 1800   # 30 min
-    RESEARCH_INTERVAL         = 3600   # 1 hour
+    INTERNET_REFRESH_INTERVAL = 1800   # 30 min — news fetch
+    RESEARCH_INTERVAL         = 3600   # 1 hour — asset-specific web research
+    KNOWLEDGE_INTERVAL        = 1500   # 25 min — trading-knowledge research
+                                       # (techniques, strategies, concepts)
 
-    def __init__(self, asset: str = None, base_dir: str = None):
-        self.asset    = asset or config.ASSET
-        self.base_dir = base_dir or config.MODEL_DIR
+    def __init__(self, asset: str = None, base_dir: str = None,
+                 account_type: str = None):
+        self.asset        = asset or config.ASSET
+        self.base_dir     = base_dir or config.MODEL_DIR
+        self.account_type = (account_type or config.IQ_ACCOUNT_TYPE or "PRACTICE").upper()
 
         self.graph      = KnowledgeGraph(base_dir=self.base_dir)
-        self.short_term = ShortTermMemory(capacity=1000)   # เพิ่มจาก 500
+        self.short_term = ShortTermMemory(capacity=1000)
         self.episodic   = EpisodicMemory(base_dir=self.base_dir)
 
         self.news       = NewsFetcher(asset=self.asset)
         self.calendar   = EconomicCalendar(currencies=self._asset_currencies(self.asset))
-        self.researcher = WebResearcher(asset=self.asset)
+        self.researcher           = WebResearcher(asset=self.asset)
+        self.knowledge_researcher = KnowledgeResearcher(asset=self.asset)
 
         self.reasoner = BrainReasoner(
             graph=self.graph,
@@ -78,6 +95,20 @@ class BrainCore:
             asset=self.asset,
         )
 
+        # ── Living Brain subsystems ─────────────────────────────────────────
+        self.working_memory = WorkingMemory(capacity=20, account_type=self.account_type)
+        self.strategy_lib   = StrategyLibrary(base_dir=self.base_dir)
+        self.reflection     = SelfReflectionEngine(base_dir=self.base_dir)
+        self.fast_learner   = FastLearner(obs_size=OBS_SIZE)
+        self.pattern_memory  = CandlePatternMemory(base_dir=self.base_dir)
+        self._market_mode    = "OTC"   # "OTC" or "REAL"
+
+        # ── State tracking ──────────────────────────────────────────────────
+        self._last_strategy_name: str = "Unknown"
+        self._last_confidence:    float = 0.5
+        self._last_indicator_vec: Optional[np.ndarray] = None
+        self._last_regime:        str = "unknown"
+
         self._stop_event      = threading.Event()
         self._internet_thread = threading.Thread(
             target=self._internet_loop, daemon=True
@@ -85,9 +116,26 @@ class BrainCore:
         self._internet_thread.start()
 
         logger.info(
-            "BrainCore ULTRA online | asset=%s | nodes=%d",
+            "BrainCore ULTRA (Living Brain) online | asset=%s | nodes=%d",
             self.asset, self.graph.stats()["total_nodes"]
         )
+
+    # ── Account-type plumbing ─────────────────────────────────────────────────
+
+    def set_account_type(self, account_type: str) -> None:
+        """Propagate account type to subsystems that change behaviour by it."""
+        new = (account_type or "PRACTICE").upper()
+        self.account_type = new
+        self.working_memory.set_account_type(new)
+
+    def set_market_mode(self, mode: str) -> None:
+        """Switch between 'OTC' and 'REAL' market mode.
+        OTC: skip news/calendar, rely on patterns + indicators.
+        REAL: full news/calendar/sentiment active.
+        """
+        self._market_mode = mode.upper()
+        self.reasoner.set_market_mode(self._market_mode)
+        logger.info("Market mode → %s", self._market_mode)
 
     # ── Main interface ─────────────────────────────────────────────────────────
 
@@ -96,13 +144,74 @@ class BrainCore:
         indicator_vec: np.ndarray,
         ppo_action: int,
         ppo_confidence: float,
+        candles=None,
     ) -> BrainSignal:
+        # ── Build snapshot ──────────────────────────────────────────────────
+        snapshot = {
+            name: float(indicator_vec[i]) if i < len(indicator_vec) else 0.0
+            for i, name in enumerate(INDICATOR_NAMES)
+        }
+
+        # Pattern memory lookup (OTC: main signal; REAL: supplementary)
+        pattern_result = None
+        if candles is not None:
+            pattern_result = self.pattern_memory.lookup(candles)
+
+        # Multi-timeframe trend: synthetic 5-min trend from 1-min candles
+        mtf_trend = self._compute_mtf_trend(candles)
+
+        # ── Working memory context ──────────────────────────────────────────
+        wm_pattern = self.working_memory.get_recent_pattern()
+        wm_attention = self.working_memory.get_active_attention(indicator_vec[:40]
+                       if len(indicator_vec) >= 40 else indicator_vec)
+        should_pause = self.working_memory.should_pause()
+
+        # ── Strategy selection ──────────────────────────────────────────────
+        strategy = self.strategy_lib.select_strategy(snapshot)
+        strategy_signal = None
+        strategy_name   = "Unknown"
+
+        if strategy is not None:
+            strategy_name   = strategy.name
+            strategy_signal = self.strategy_lib.get_strategy_signal(strategy, snapshot)
+
+        self._last_strategy_name = strategy_name
+
+        # ── Reasoner with strategy signal ───────────────────────────────────
         signal = self.reasoner.think(
             indicator_vec=indicator_vec,
             indicator_names=INDICATOR_NAMES,
             ppo_action=ppo_action,
             ppo_confidence=ppo_confidence,
+            strategy_signal=strategy_signal,
+            strategy_name=strategy_name,
+            pattern_result=pattern_result,
+            mtf_trend=mtf_trend,
         )
+
+        # ── Record this cycle's signal strength for recovery tracking ───────
+        # (no-op on PRACTICE; on REAL it counts toward resume-readiness)
+        self.working_memory.record_observation(signal.confidence)
+
+        # ── Should-pause override (REAL accounts only) ──────────────────────
+        if should_pause and signal.action != 0:
+            status = self.working_memory.get_pause_status()
+            signal.action     = 0
+            signal.confidence = 0.9
+            signal.reasoning.append(
+                f"PAUSE (REAL) — {status.get('reason','')}; "
+                f"cool-off {status.get('cooldown_remaining',0)}s, "
+                f"strong {status.get('strong_seen',0)}/{status.get('strong_needed',0)}"
+            )
+            logger.info("BrainCore: PAUSE active — recovery %d/%d strong, %ds cool-off left",
+                        status.get("strong_seen", 0),
+                        status.get("strong_needed", 0),
+                        status.get("cooldown_remaining", 0))
+
+        # ── Update state ─────────────────────────────────────────────────────
+        self._last_confidence    = signal.confidence
+        self._last_indicator_vec = indicator_vec.copy()
+        self._last_regime        = signal.regime
 
         obs = Observation(
             timestamp=time.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -114,7 +223,22 @@ class BrainCore:
         self.short_term.record(obs)
         return signal
 
-    def learn(self, pnl: float, action_taken: int, indicator_vec: np.ndarray, ppo_action: int):
+    def learn(
+        self,
+        pnl: float,
+        action_taken: int,
+        indicator_vec: np.ndarray,
+        ppo_action: int,
+        next_obs: Optional[np.ndarray] = None,
+        candles=None,
+    ):
+        # Record candle pattern outcome for OTC pattern memory
+        if candles is not None:
+            try:
+                self.pattern_memory.record(candles, pnl)
+            except Exception:
+                pass
+
         self.short_term.update_last_reward(pnl)
 
         snapshot = {
@@ -122,6 +246,47 @@ class BrainCore:
             for i, name in enumerate(INDICATOR_NAMES)
         }
 
+        # ── FastLearner online update ────────────────────────────────────────
+        if next_obs is not None and self._last_indicator_vec is not None:
+            try:
+                obs_arr = self._last_indicator_vec.astype(np.float32)
+                nxt_arr = next_obs.astype(np.float32)
+                if len(obs_arr) == OBS_SIZE and len(nxt_arr) == OBS_SIZE:
+                    self.fast_learner.update_online(
+                        obs=obs_arr,
+                        action=action_taken,
+                        reward=float(pnl),
+                        next_obs=nxt_arr,
+                        done=False,
+                    )
+            except Exception as exc:
+                logger.debug("FastLearner update error: %s", exc)
+
+        # ── Working memory update ────────────────────────────────────────────
+        self.working_memory.update(
+            obs=indicator_vec,
+            action=action_taken,
+            confidence=self._last_confidence,
+            pnl=pnl,
+        )
+
+        # ── Self reflection ──────────────────────────────────────────────────
+        try:
+            self.reflection.reflect(
+                action=action_taken,
+                pnl=pnl,
+                indicators=snapshot,
+                strategy_name=self._last_strategy_name,
+                confidence=self._last_confidence,
+                regime=self._last_regime,
+            )
+        except Exception as exc:
+            logger.debug("Reflection error: %s", exc)
+
+        # ── Strategy outcome ─────────────────────────────────────────────────
+        self.strategy_lib.record_outcome(self._last_strategy_name, pnl > 0)
+
+        # ── Existing reasoner learning ───────────────────────────────────────
         self.reasoner.learn_from_outcome(
             pnl=pnl,
             action_taken=action_taken,
@@ -155,6 +320,14 @@ class BrainCore:
         # Indicator reliability (top 5)
         top_indicators = self.reasoner.reliability.top_indicators(5)
 
+        # Living Brain extras
+        wm_pattern       = self.working_memory.get_recent_pattern()
+        should_pause     = self.working_memory.should_pause()
+        pause_status     = self.working_memory.get_pause_status()
+        strategy_stats   = self.strategy_lib.get_stats()
+        recent_mistakes  = self.reflection.get_recent_mistakes(5)
+        improvement_tips = self.reflection.get_improvement_tips()
+
         return {
             "graph_nodes":        graph_stats["total_nodes"],
             "graph_branches":     graph_stats["total_edges"],
@@ -178,6 +351,17 @@ class BrainCore:
             # ULTRA extras
             "top_indicators":     top_indicators,
             "ppo_updates":        ppo_updates,
+            # Living Brain extras
+            "strategy_stats":           strategy_stats,
+            "recent_mistakes":          recent_mistakes,
+            "improvement_tips":         improvement_tips,
+            "working_memory_pattern":   wm_pattern,
+            "should_pause":             should_pause,
+            "pause_status":             pause_status,
+            "account_type":             self.account_type,
+            "active_strategy":          self._last_strategy_name,
+            "pattern_memory":           self.pattern_memory.stats(),
+            "market_mode":              self._market_mode,
         }
 
     def shutdown(self):
@@ -189,39 +373,93 @@ class BrainCore:
 
     def _internet_loop(self):
         time.sleep(30)
-        last_news  = 0.0
-        last_res   = 0.0
+        last_news      = 0.0
+        last_res       = 0.0
+        last_knowledge = 0.0
 
         while not self._stop_event.is_set():
             now = time.time()
 
-            if (now - last_news) >= self.INTERNET_REFRESH_INTERVAL:
-                try:
-                    self.reasoner.absorb_news_as_nodes()
-                    last_news = now
-                    logger.info("Brain absorbed latest news")
-                except Exception as exc:
-                    logger.debug("News error: %s", exc)
+            # In OTC mode, news and asset-specific research are irrelevant —
+            # skip them to avoid noise and save bandwidth.
+            if self._market_mode != "OTC":
+                if (now - last_news) >= self.INTERNET_REFRESH_INTERVAL:
+                    try:
+                        self.reasoner.absorb_news_as_nodes()
+                        last_news = now
+                        logger.info("Brain absorbed latest news")
+                    except Exception as exc:
+                        logger.debug("News error: %s", exc)
 
-            if (now - last_res) >= self.RESEARCH_INTERVAL:
+                if (now - last_res) >= self.RESEARCH_INTERVAL:
+                    try:
+                        new_nodes = self.researcher.research()
+                        if new_nodes:
+                            self.reasoner.absorb_internet_knowledge(new_nodes)
+                        last_res = now
+                    except Exception as exc:
+                        logger.debug("Research error: %s", exc)
+            else:
+                # Keep last_news/last_res updated to avoid burst when switching modes
+                last_news = now
+                last_res  = now
+
+            # Knowledge research (techniques/strategies) runs in both modes
+            if (now - last_knowledge) >= self.KNOWLEDGE_INTERVAL:
                 try:
-                    new_nodes = self.researcher.research()
+                    new_nodes = self.knowledge_researcher.research()
                     if new_nodes:
                         self.reasoner.absorb_internet_knowledge(new_nodes)
-                    last_res = now
+                        logger.info("Brain learned %d new trading concepts from internet",
+                                    len(new_nodes))
+                    last_knowledge = now
                 except Exception as exc:
-                    logger.debug("Research error: %s", exc)
+                    logger.debug("KnowledgeResearcher error: %s", exc)
 
             self._stop_event.wait(timeout=60)
 
     def _log_brain_state(self, pnl: float):
         direction = "WIN" if pnl > 0 else "LOSS"
         logger.info(
-            "Brain updated after %s (pnl=%.2f) | nodes=%d | win_rate=%.1f%%",
+            "Brain updated after %s (pnl=%.2f) | nodes=%d | win_rate=%.1f%% | strategy=%s",
             direction, pnl,
             self.graph.stats()["total_nodes"],
             self.short_term.win_rate() * 100,
+            self._last_strategy_name,
         )
+
+    @staticmethod
+    def _compute_mtf_trend(candles) -> int:
+        """
+        Compute a synthetic 5-minute trend from 1-minute candle data.
+
+        Groups every 5 consecutive 1-min candles into one synthetic 5-min bar
+        (using the last close of each group), then computes EMA(3) over the
+        resulting bars.  Returns:
+          +1  if current price > EMA(3) by > 0.03 %  → up-trend
+          -1  if current price < EMA(3) by > 0.03 %  → down-trend
+           0  otherwise (neutral / not enough data)
+        """
+        if candles is None or len(candles) < 25:
+            return 0
+        try:
+            closes = candles["close"].values[-25:]
+            # Build 5 synthetic 5-min bar closes (index 4, 9, 14, 19, 24)
+            bars = [float(closes[i * 5 + 4]) for i in range(5)]
+            # EMA(3) with alpha = 2/(3+1) = 0.5
+            alpha = 0.5
+            ema = bars[0]
+            for b in bars[1:]:
+                ema = alpha * b + (1.0 - alpha) * ema
+            current = bars[-1]
+            threshold = ema * 0.0003   # 0.03 % to filter micro-noise
+            if current > ema + threshold:
+                return 1
+            if current < ema - threshold:
+                return -1
+        except Exception:
+            pass
+        return 0
 
     @staticmethod
     def _asset_currencies(asset: str) -> List[str]:
