@@ -131,10 +131,18 @@ def _send_desire_email_sync(desire: dict) -> None:
 
 def _on_desire_registered(desire: dict) -> None:
     """Called from BrainCore thread when a new desire is registered."""
-    # Broadcast to UI
     broadcast_sync({"type": "desire_new", "desire": desire})
-    # Send email in background thread (non-blocking)
     threading.Thread(target=_send_desire_email_sync, args=(desire,), daemon=True).start()
+
+
+def _on_journal_entry(entry: dict) -> None:
+    """Called from AIJournal when a new diary entry is written."""
+    broadcast_sync({
+        "type":    "chat_ai",
+        "message": entry["message"],
+        "mood":    entry.get("mood", "📔"),
+        "ts":      entry.get("ts", ""),
+    })
 
 
 _load_smtp_config()
@@ -2084,6 +2092,7 @@ def _init_components():
     _brain     = BrainCore(asset=config.ASSET, base_dir=config.MODEL_DIR,
                            account_type=config.IQ_ACCOUNT_TYPE)
     _brain.desire_engine.set_notify_callback(_on_desire_registered)
+    _brain.journal.set_entry_callback(_on_journal_entry)
 
     from trading_ai.brain.capital_guard import CapitalGuard
     _capital_guard = CapitalGuard(account_type=config.IQ_ACCOUNT_TYPE)

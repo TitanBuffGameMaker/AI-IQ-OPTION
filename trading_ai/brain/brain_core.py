@@ -38,6 +38,8 @@ from trading_ai.brain.neuro import CLSMemory, DopamineSystem, FearSystem, SleepC
 from trading_ai.brain.nas import NASEngine
 from trading_ai.brain.nas.nas_engine import NASConfig
 from trading_ai.models.per_buffer import PrioritizedReplayBuffer
+from trading_ai.brain.analysis import MetaStrategyEngine, WeakPointFinder
+from trading_ai.brain.journal import AIJournal
 from trading_ai.brain.working_memory import WorkingMemory
 from trading_ai.brain.strategy_library import StrategyLibrary
 from trading_ai.brain.self_reflection import SelfReflectionEngine
@@ -147,6 +149,11 @@ class BrainCore:
         # ── Adaptive Confidence — AI ปรับ threshold ตามผลงานตัวเอง ─────────
         self._perf_window: list = []   # rolling 30-trade win/loss
         self._conf_multiplier: float = 1.0   # 0.80–1.15
+
+        # ── Context intelligence & self-awareness ────────────────────────────
+        self.meta_strategy = MetaStrategyEngine(base_dir=self.base_dir)
+        self.weak_point    = WeakPointFinder()
+        self.journal       = AIJournal(write_every=50)
 
         # ── State tracking ──────────────────────────────────────────────────
         self._last_strategy_name: str = "Unknown"
@@ -300,6 +307,26 @@ class BrainCore:
                 signal.reasoning.append(
                     f"CLS neocortex: {cls_wr:.0%} — context นี้เสี่ยง"
                 )
+
+        # ── MetaStrategy multiplier — context-specific performance ──────────
+        if signal.action != 0:
+            hour = time.localtime().tm_hour
+            meta_mult = self.meta_strategy.get_context_multiplier(
+                asset=self.asset,
+                hour=hour,
+                regime=signal.regime,
+                strategy=strategy_name,
+            )
+            if meta_mult != 1.0:
+                signal.confidence = float(np.clip(signal.confidence * meta_mult, 0.0, 0.95))
+                if meta_mult > 1.1:
+                    signal.reasoning.append(
+                        f"MetaStrategy: context นี้เคยทำได้ดี (×{meta_mult:.2f})"
+                    )
+                elif meta_mult < 0.9:
+                    signal.reasoning.append(
+                        f"MetaStrategy: context นี้เคยทำได้ไม่ดี (×{meta_mult:.2f})"
+                    )
 
         # ── Adaptive confidence multiplier ───────────────────────────────────
         signal.confidence = round(
@@ -495,6 +522,27 @@ class BrainCore:
             self._pnl_log = self._pnl_log[-50:]
         self._maybe_generate_desire()
 
+        # ── Context intelligence ─────────────────────────────────────────────
+        hour = time.localtime().tm_hour
+        self.meta_strategy.record(
+            asset=self.asset,
+            hour=hour,
+            regime=self._last_regime,
+            strategy=self._last_strategy_name,
+            pnl=pnl,
+        )
+        self.weak_point.record(
+            regime=self._last_regime,
+            hour=hour,
+            asset=self.asset,
+            strategy=self._last_strategy_name,
+            pnl=pnl,
+        )
+        self.weak_point.maybe_register_desires(self.desire_engine)
+
+        # ── AI Journal: periodic self-reflection ─────────────────────────────
+        self.journal.tick(self)
+
     # ── Sleep callback ─────────────────────────────────────────────────────────
 
     def _on_sleep_state(self, sleeping: bool) -> None:
@@ -628,6 +676,10 @@ class BrainCore:
             # PER + Adaptive conf
             "per_buffer":               self.per_buffer.stats(),
             "conf_multiplier":          round(self._conf_multiplier, 3),
+            # Context intelligence
+            "meta_strategy":            self.meta_strategy.stats(),
+            "weak_point":               self.weak_point.stats(),
+            "journal":                  self.journal.stats(),
         }
 
     def shutdown(self):
