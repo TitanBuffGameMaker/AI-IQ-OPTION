@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 VALID_OTC_ASSETS = [
     "EUR/USD (OTC)",
     "GBP/USD (OTC)",
-    "USD/AED (OTC)",
+    "EUR/CAD (OTC)",
     "GBP/JPY (OTC)",
     "EUR/JPY (OTC)",
     "USD/JPY (OTC)",

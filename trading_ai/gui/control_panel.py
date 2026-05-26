@@ -34,7 +34,7 @@ TEXT_WHITE  = "#e8eaf6"
 TEXT_GRAY   = "#9fa8da"
 TEXT_DIM    = "#5c6bc0"
 
-OTC_ASSETS = ["EUR/USD (OTC)", "GBP/USD (OTC)", "USD/AED (OTC)", "EUR/JPY (OTC)"]
+OTC_ASSETS = ["EUR/USD (OTC)", "GBP/USD (OTC)", "EUR/CAD (OTC)", "EUR/JPY (OTC)"]
 
 POSITIONS = [
     ("top_left",     0, 0),

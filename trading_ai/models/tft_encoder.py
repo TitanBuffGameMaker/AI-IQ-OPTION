@@ -9,12 +9,16 @@ Components:
   ActorCriticV2              — full Semi-Pro actor-critic using the above
 """
 import math
+import warnings
 from typing import Optional
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributions import Categorical
+
+# Suppress PyTorch nested-tensor warning (norm_first=True disables it anyway)
+warnings.filterwarnings("ignore", message=".*enable_nested_tensor.*")
 
 # Observation layout (must match trading_env.py)
 N_IND      = 40    # technical indicator features

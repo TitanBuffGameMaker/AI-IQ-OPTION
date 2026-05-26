@@ -52,7 +52,8 @@ ASSET_KEYWORDS = {
                 "BOE", "GBPUSD"],
     "USDJPY":  ["JPY", "USD", "yen", "dollar", "Bank of Japan", "BOJ", "USDJPY"],
     "EURJPY":  ["EUR", "JPY", "euro", "yen", "ECB", "Bank of Japan", "EURJPY"],
-    "USDAED":  ["AED", "USD", "dirham", "dollar", "UAE", "USDAED"],
+    "EURCAD":  ["EUR", "CAD", "euro", "canadian dollar", "loonie", "ECB",
+                "Bank of Canada", "BOC", "EURCAD"],
     "BTCUSD":  ["bitcoin", "BTC", "crypto", "cryptocurrency", "BTCUSD"],
     "GOLD":    ["gold", "XAU", "precious metals", "safe haven"],
 }

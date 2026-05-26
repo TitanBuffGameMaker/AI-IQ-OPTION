@@ -2306,7 +2306,7 @@ def _ai_loop():
 
 # ── Startup: init all components ──────────────────────────────────────────────
 OTC_ASSETS = [
-    "EUR/USD (OTC)", "GBP/USD (OTC)", "USD/AED (OTC)",
+    "EUR/USD (OTC)", "GBP/USD (OTC)", "EUR/CAD (OTC)",
     "EUR/JPY (OTC)",
 ]
 
@@ -2315,11 +2315,7 @@ OTC_ASSET_MAP: Dict[str, List[str]] = {
     "EUR/USD (OTC)": ["EURUSD-OTC", "EURUSD_otc", "frxEURUSD", "EURUSD"],
     "GBP/USD (OTC)": ["GBPUSD-OTC", "GBPUSD_otc", "frxGBPUSD", "GBPUSD"],
     "EUR/JPY (OTC)": ["EURJPY-OTC", "EURJPY_otc", "frxEURJPY", "EURJPY"],
-    "USD/AED (OTC)": [
-        "USDAED-OTC", "USDAED_otc", "frxUSDAED", "USDAED",
-        "USD/AED-OTC", "USD/AED", "usdaed-otc", "usdaed",
-        "USDAED_OTC", "USD-AED-OTC",
-    ],
+    "EUR/CAD (OTC)": ["EURCAD-OTC", "EURCAD_otc", "frxEURCAD", "EURCAD"],
 }
 
 # Sanity-check price ranges per asset.  Prices outside these bounds mean
@@ -2328,11 +2324,15 @@ PRICE_RANGES: Dict[str, tuple] = {
     "EUR/USD (OTC)": (0.90, 1.45),
     "GBP/USD (OTC)": (1.10, 1.75),
     "EUR/JPY (OTC)": (130.0, 200.0),   # EUR/JPY is ~184 in 2025-2026
-    "USD/AED (OTC)": (3.40, 4.00),     # USD/AED ~3.67; wider range for API variance
+    "EUR/CAD (OTC)": (1.40, 1.70),     # EUR/CAD is ~1.56 in 2026
 }
 
 # Cache: display_name → resolved api_name (once found, reuse)
 _resolved_asset_names: Dict[str, str] = {}
+# Cache: display_name → timestamp when we last logged "all names failed"
+# Prevents spam-WARNING every 13 seconds for unsupported assets.
+_resolve_failed_at: Dict[str, float] = {}
+_RESOLVE_RETRY_SECS = 600   # re-try failed assets after 10 minutes
 
 # Cache: display_name → list of {time,open,high,low,close} for chart history
 _candle_history: Dict[str, List[Dict]] = {a: [] for a in OTC_ASSETS}
@@ -2356,9 +2356,15 @@ def _resolve_asset_name(display_name: str) -> Optional[str]:
       1. A global _candle_lock in IQOptionConnector.get_candles() — only one
          call is in-flight at any time, plus a settle delay inside the lock.
       2. Validating the returned price against known sane ranges.
+    Failed lookups are suppressed for _RESOLVE_RETRY_SECS to avoid log spam.
     """
     if display_name in _resolved_asset_names:
         return _resolved_asset_names[display_name]
+
+    # Don't spam-retry assets that have already failed recently
+    last_fail = _resolve_failed_at.get(display_name, 0.0)
+    if time.time() - last_fail < _RESOLVE_RETRY_SECS:
+        return None
 
     lo, hi = PRICE_RANGES.get(display_name, (0.0, 1e9))
 
@@ -2380,9 +2386,11 @@ def _resolve_asset_name(display_name: str) -> Optional[str]:
             tried.append(f"{api_name}(err:{type(e).__name__})")
             continue
 
+    # Record failure time — suppress further retries for _RESOLVE_RETRY_SECS
+    _resolve_failed_at[display_name] = time.time()
     logger.warning(
-        "Could not resolve API name for %s. Tried: %s",
-        display_name, ", ".join(tried),
+        "Could not resolve API name for %s (will retry in %ds). Tried: %s",
+        display_name, _RESOLVE_RETRY_SECS, ", ".join(tried),
     )
     return None
 
@@ -2593,6 +2601,7 @@ def _price_loop():
                     logger.warning("Price sanity fail %s: %.5f not in [%.2f, %.2f] — re-resolving",
                                    display_name, cur_close, lo, hi)
                     _resolved_asset_names.pop(display_name, None)
+                    _resolve_failed_at.pop(display_name, None)   # allow immediate re-probe
                     continue
 
                 candle = {

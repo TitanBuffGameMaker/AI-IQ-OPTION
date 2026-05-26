@@ -27,7 +27,7 @@ _CANDLE_SETTLE_SECS = 0.7   # time to let iqoptionapi's WS buffer clear after ea
 
 # IQ Option sometimes returns OTC assets under plain Forex names (e.g. "EURUSD"
 # instead of "EURUSD-OTC").  These are still OTC instruments and always open.
-_ALWAYS_OPEN_NAMES = {"USDAED", "EURUSD", "GBPUSD", "EURJPY", "USDCAD", "USDCHF"}
+_ALWAYS_OPEN_NAMES = {"EURCAD", "EURUSD", "GBPUSD", "EURJPY", "USDCAD", "USDCHF"}
 
 
 # ── Silence iqoptionapi internal noise ────────────────────────────────────────
@@ -399,3 +399,20 @@ class IQOptionConnector:
             return False
         except Exception:
             return False
+
+    def disconnect(self) -> None:
+        """Gracefully close the IQ Option WebSocket session."""
+        self._connected = False
+        if self.api is None:
+            return
+        try:
+            # iqoptionapi exposes close() on the underlying ws client
+            inner = getattr(self.api, "api", None) or getattr(self.api, "ws", None)
+            if inner is not None:
+                close_fn = getattr(inner, "close", None)
+                if callable(close_fn):
+                    close_fn()
+        except Exception:
+            pass
+        finally:
+            self.api = None
