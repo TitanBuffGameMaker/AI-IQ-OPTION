@@ -129,7 +129,10 @@ class GraduationSystem:
         mem_summary  = brain.episodic.summary()
         graph_stats  = brain.graph.stats()
         trades       = mem_summary.get("total", 0)
-        wr           = brain.short_term.win_rate()
+        # Win rate from all-time episodic memory (persists across restarts).
+        # Falls back to short-term only when episodic is empty (brand new brain).
+        ep_wins = mem_summary.get("wins", 0)
+        wr = ep_wins / max(trades, 1) if trades > 0 else brain.short_term.win_rate()
         rules        = brain.rule_distiller.get_rules()
         ep           = trades
 
