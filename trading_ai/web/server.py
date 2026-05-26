@@ -201,40 +201,226 @@ class ThinkingAI:
         return ctx
 
     def think(self, message: str) -> str:
-        ctx = self._ctx()
-        msg = message.strip().lower()
+        ctx  = self._ctx()
+        raw  = message.strip()
+        msg  = raw.lower()
 
-        if any(w in msg for w in {"สวัสดี","hello","hi","หวัดดี","hey","ดีครับ","ดีค่ะ"}):
+        # ── 1. Action intents — ต้องทำอะไรบางอย่างก่อนตอบ ─────────────
+        if any(w in msg for w in {"email","อีเมล","อีเมลล์","smtp","mail","เมล"}):
+            return self._on_email(msg)
+
+        if any(w in msg for w in {"start ai","เริ่ม ai","เปิด ai","รัน ai","start trading"}):
+            return "กด ▶ START AI ที่ navbar ด้านบนได้เลยครับ หรือจะให้ผมสรุปสถานะก่อนก็ได้"
+
+        if any(w in msg for w in {"stop ai","หยุด ai","ปิด ai","stop trading"}):
+            return "กด ⏹ STOP AI ที่ navbar ด้านบนได้เลยครับ"
+
+        # ── 2. Greeting ────────────────────────────────────────────────
+        if any(w in msg for w in {"สวัสดี","hello","hi","หวัดดี","hey","ดีครับ","ดีค่ะ","ดีจ้า","yo"}):
             return self._greet(ctx)
-        if any(w in msg for w in {"เก่งขึ้น","improve","ดีขึ้น","พัฒนา","better","จะเก่ง"}):
+
+        # ── 3. Improvement / เก่งขึ้น ─────────────────────────────────
+        if any(w in msg for w in {"เก่งขึ้น","improve","ดีขึ้น","พัฒนา","better","จะเก่ง",
+                                   "ฉลาดขึ้น","เรียนรู้","learn more","progress"}):
             return self._on_improvement(ctx)
-        if any(w in msg for w in {"ทำไม","why","เหตุผล","reason","อธิบาย"}):
+
+        # ── 4. Why / อธิบาย ───────────────────────────────────────────
+        if any(w in msg for w in {"ทำไม","why","เหตุผล","reason","อธิบาย","explain",
+                                   "เพราะ","because","ตัดสินใจ","decision"}):
             return self._on_why(ctx)
-        if any(w in msg for w in {"win rate","อัตราชนะ","ชนะ","แพ้","เสีย","trade","เทรด"}):
+
+        # ── 5. Win rate / performance ─────────────────────────────────
+        if any(w in msg for w in {"win rate","winrate","อัตราชนะ","ชนะ","แพ้","เสีย",
+                                   "trade","เทรด","ผลลัพธ์","performance","result","สถิติ"}):
             return self._on_performance(ctx)
-        if any(w in msg for w in {"ตลาด","market","regime","trend","ranging","volatile"}):
+
+        # ── 6. Market / regime ─────────────────────────────────────────
+        if any(w in msg for w in {"ตลาด","market","regime","trend","ranging","volatile",
+                                   "สภาวะ","ทิศทาง","movement","แนวโน้ม"}):
             return self._on_market(ctx)
-        if any(w in msg for w in {"ความจำ","memory","จำ","pattern","sequence","episodic"}):
+
+        # ── 7. Memory ──────────────────────────────────────────────────
+        if any(w in msg for w in {"ความจำ","memory","จำ","pattern","sequence","episodic",
+                                   "จำได้","ประสบการณ์","experience","fingerprint"}):
             return self._on_memory(ctx)
-        if any(w in msg for w in {"uncertainty","ไม่แน่นอน","มั่นใจ","epistemic"}):
+
+        # ── 8. Uncertainty ─────────────────────────────────────────────
+        if any(w in msg for w in {"uncertainty","ไม่แน่นอน","มั่นใจ","epistemic","aleatoric",
+                                   "กลัว","ลังเล","confident","แน่ใจ"}):
             return self._on_uncertainty(ctx)
-        if any(w in msg for w in {"กฎ","rule","distil","สกัด"}):
+
+        # ── 9. Rules / กฎ ─────────────────────────────────────────────
+        if any(w in msg for w in {"กฎ","rule","rules","distil","สกัด","หลักการ","principle"}):
             return self._on_rules(ctx)
-        if any(w in msg for w in {"กลยุทธ์","strategy","วิธี"}):
+
+        # ── 10. Strategy ───────────────────────────────────────────────
+        if any(w in msg for w in {"กลยุทธ์","strategy","วิธี","แผน","approach","ichimoku",
+                                   "ema","macd","rsi","bollinger"}):
             return self._on_strategy(ctx)
-        if any(w in msg for w in {"balance","เงิน","ยอด","กำไร","ขาดทุน","pnl"}):
+
+        # ── 11. Balance / money ────────────────────────────────────────
+        if any(w in msg for w in {"balance","เงิน","ยอด","กำไร","ขาดทุน","pnl","profit",
+                                   "loss","บาลานซ์","ยอดเงิน","เงินเหลือ"}):
             return self._on_balance(ctx)
-        if any(w in msg for w in {"capitalguard","capital","guard","หยุด","ป้องกัน","limit"}):
+
+        # ── 12. Capital Guard ──────────────────────────────────────────
+        if any(w in msg for w in {"capitalguard","capital guard","guard","ป้องกัน","limit",
+                                   "kelly","daily loss","หยุดเทรด","risk"}):
             return self._on_capguard(ctx)
-        if any(w in msg for w in {"สรุป","สถานะ","status","ตอนนี้","เป็นยังไง","overview"}):
+
+        # ── 13. Status / สรุป ─────────────────────────────────────────
+        if any(w in msg for w in {"สรุป","สถานะ","status","ตอนนี้","เป็นยังไง","overview",
+                                   "ดูสิ","รายงาน","report","บอกสิ","บอกด้วย","เป็นไง"}):
             return self._full_reflection(ctx)
-        if any(w in msg for w in {"ต้องการ","อยาก","want","need","ขอ","ปรับปรุง"}):
+
+        # ── 14. Needs / ต้องการ ───────────────────────────────────────
+        if any(w in msg for w in {"ต้องการ","อยาก","want","need","ขอ","ปรับปรุง","ช่วย",
+                                   "help","ต้องการอะไร","อยากได้"}):
             return self._on_needs(ctx)
-        if any(w in msg for w in {"คิด","think","รู้สึก","feel","สังเกต","observe","ช่วย","help"}):
+
+        # ── 15. Brain / knowledge graph ───────────────────────────────
+        if any(w in msg for w in {"brain","สมอง","node","knowledge","ความรู้","graph",
+                                   "อายุ brain","brain age","score","คะแนน"}):
+            return self._on_brain_status(ctx)
+
+        # ── 16. Observation / คิด ─────────────────────────────────────
+        if any(w in msg for w in {"คิด","think","รู้สึก","feel","สังเกต","observe",
+                                   "เห็น","notice","ความคิด","ความรู้สึก"}):
             return self._general_reflection(ctx)
 
-        # ไม่ตรงกับ keyword ใดเลย → ไม่บอกว่าไม่รู้ แต่คิดให้
-        return self._general_reflection(ctx)
+        # ── Fallback: ไม่เข้าใจ → ยอมรับตรงๆ อย่า dump metrics ────────
+        return self._thoughtful_fallback(raw, ctx)
+
+    def _on_email(self, msg: str) -> str:
+        """Handle email questions and test-send requests."""
+        import smtplib as _smtp
+        from email.mime.text import MIMEText as _MIMEText
+
+        cfg  = _smtp_config
+        user = cfg.get("smtp_user", "") or os.environ.get("SMTP_USER", "")
+        pswd = cfg.get("smtp_pass", "") or os.environ.get("SMTP_PASS", "")
+        to   = cfg.get("notify_email", user)
+
+        # ยังไม่ตั้งค่า
+        if not user:
+            return (
+                "📧 ยังไม่ได้ตั้งค่า Email ครับ\n\n"
+                "วิธีตั้งค่า:\n"
+                "1. ไปที่ 🛡️ กฎ AI → เลื่อนลงส่วน 'ตั้งค่า Email'\n"
+                "2. กรอก Gmail address\n"
+                "3. กรอก App Password (สร้างจาก Google Account → Security → 2-Step → App passwords)\n"
+                "4. กด บันทึก\n\n"
+                "⚠️ App Password ≠ รหัสผ่าน Gmail ปกติ — ต้องสร้างแยกต่างหาก"
+            )
+
+        is_test = any(w in msg for w in {"ทดสอบ","test","ลอง","ส่ง","send","check"})
+
+        if not pswd:
+            return (
+                f"📧 มี Email: {user}\n"
+                f"ส่งถึง: {to}\n\n"
+                "⚠️ ยังไม่ได้กรอก App Password ครับ — กรอกใน 🛡️ กฎ AI tab แล้วกด บันทึก"
+            )
+
+        if is_test:
+            try:
+                msg_obj = _MIMEText(
+                    "ทดสอบระบบแจ้งเตือน AI Trading Brain\n\nทุกอย่างปกติ ✅\n\nส่งจาก AI ตัวเอง",
+                    "plain", "utf-8"
+                )
+                msg_obj["Subject"] = "[AI Trading Brain] ทดสอบการส่ง Email ✅"
+                msg_obj["From"]    = user
+                msg_obj["To"]      = to
+                with _smtp.SMTP_SSL("smtp.gmail.com", 465, timeout=10) as srv:
+                    srv.login(user, pswd)
+                    srv.sendmail(user, to, msg_obj.as_string())
+                return (
+                    f"✅ ส่ง Email ทดสอบสำเร็จ!\n\n"
+                    f"จาก: {user}\n"
+                    f"ถึง: {to}\n\n"
+                    "เช็ค inbox ได้เลยครับ 📬\n"
+                    "(ถ้าไม่เจอ ลองเช็ค Spam folder)"
+                )
+            except Exception as e:
+                err = str(e)
+                hint = ""
+                if "Username and Password" in err or "535" in err:
+                    hint = "\n💡 App Password ไม่ถูกต้อง — ลองสร้างใหม่จาก Google Account"
+                elif "timed out" in err or "10060" in err:
+                    hint = "\n💡 เชื่อมต่อ Gmail ไม่ได้ — เช็ค internet connection"
+                elif "less secure" in err:
+                    hint = "\n💡 ต้องใช้ App Password ไม่ใช่รหัสผ่านปกติ"
+                return f"❌ ส่ง Email ไม่สำเร็จ\n\nError: {err[:120]}{hint}"
+
+        return (
+            f"📧 Email ตั้งค่าไว้แล้ว\n\n"
+            f"บัญชี: {user}\n"
+            f"ส่งแจ้งเตือนถึง: {to}\n\n"
+            "พิมพ์ 'ทดสอบ email' เพื่อส่งทดสอบได้เลยครับ"
+        )
+
+    def _on_brain_status(self, ctx: dict) -> str:
+        trades   = ctx.get("trades", 0)
+        nodes    = ctx.get("nodes", 0)
+        episodes = ctx.get("episodes", 0)
+        stage    = ctx.get("brain_stage", "ทารก")
+        emoji    = ctx.get("brain_emoji", "👶")
+        score    = ctx.get("brain_score", 0)
+        age      = ctx.get("brain_age", 0)
+        return (
+            f"🧠 สถานะ Brain\n\n"
+            f"{emoji} {stage} — อายุ {age:.1f} ปี (score {score}/100)\n\n"
+            f"Knowledge nodes: {nodes}\n"
+            f"Episodic memories: {episodes}\n"
+            f"เทรดมาแล้ว: {trades} ไม้\n\n"
+            + self._brief_thought(ctx)
+        )
+
+    def _thoughtful_fallback(self, original: str, ctx: dict) -> str:
+        """ไม่เข้าใจคำถาม — ยอมรับตรงๆ ไม่ dump metrics"""
+        low = original.lower()
+
+        # อาจจะถามสถานะแบบ informal
+        if any(w in low for w in {"ดูสิ","บอก","แจ้ง","ยังไง","เป็นไง","เป็นอย่างไร",
+                                   "ตอนนี้","now","แล้ว","งัน","ล่ะ"}):
+            return self._full_reflection(ctx)
+
+        # ถามเกี่ยวกับ worker
+        if any(w in low for w in {"worker","เครื่องอื่น","เครื่องช่วย","fedavg"}):
+            return (
+                "⚙️ Worker คือเครื่องคอมพิวเตอร์เครื่องอื่น\n\n"
+                "ช่วยทำ 2 อย่าง:\n"
+                "1. 🏋️ Train PPO model แบบ Federated Learning\n"
+                "2. 🧠 ค้นหาความรู้จาก Wikipedia/Google News ส่งให้ brain\n\n"
+                "ดู Workers tab (⚙️) ที่ sidebar เพื่อดู URL และดาวน์โหลด .bat file"
+            )
+
+        # ถามเกี่ยวกับ signal/สัญญาณ
+        if any(w in low for w in {"signal","สัญญาณ","buy","sell","hold","เข้า","ออก"}):
+            conf   = ctx.get("confidence", 0)
+            regime = ctx.get("regime", "unknown")
+            strat  = ctx.get("strategy", "Unknown")
+            return (
+                f"📡 สัญญาณล่าสุด\n\n"
+                f"กลยุทธ์: {strat}\n"
+                f"Regime: {regime.upper()}\n"
+                f"Confidence: {conf:.1%}\n\n"
+                f"💭 ผมวิเคราะห์ตลาดต่อเนื่อง — confidence {conf:.0%} "
+                + ("ดีพอที่จะเข้า trade" if conf > 0.60 else "ยังต่ำอยู่ รอสัญญาณแน่นกว่านี้")
+            )
+
+        # ไม่รู้จริงๆ → บอกตรงๆ + แนะนำ
+        return (
+            f"💭 ผมไม่แน่ใจว่าหมายถึงอะไรครับ\n\n"
+            f"ลองถามแบบนี้ได้:\n"
+            f"• 'สรุปสถานะ' — ดูภาพรวมทั้งหมด\n"
+            f"• 'win rate เป็นเท่าไร' — สถิติการเทรด\n"
+            f"• 'ทดสอบ email' — ส่ง test email\n"
+            f"• 'brain เป็นยังไง' — สถานะ knowledge graph\n"
+            f"• 'ทำไมถึงแพ้' — วิเคราะห์สาเหตุ\n"
+            f"• 'กลยุทธ์อะไร' — กลยุทธ์ที่ใช้อยู่\n\n"
+            f"หรือถามอะไรก็ได้ครับ ผมจะพยายามตอบ 🙂"
+        )
 
     # ── Response generators ────────────────────────────────────────────────────
 
