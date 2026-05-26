@@ -232,7 +232,7 @@ class WorkerResearcher:
                     "category": category, "direction_bias": direction,
                     "source_url": data.get("content_urls", {}).get("desktop", {}).get("page", ""),
                 },
-                "confidence": 0.55, "evidence_count": 1, "contradiction_count": 0,
+                "confidence": 0.65, "evidence_count": 1, "contradiction_count": 0,
                 "activation": 1.0, "source": "wikipedia_worker",
                 "asset": None,
                 "tags": ["wikipedia", category, "knowledge", "from_worker"],
@@ -258,21 +258,37 @@ class WorkerResearcher:
                 if not title or len(title) < 10:
                     continue
                 text = (title + " " + desc).lower()
-                kws  = ["trading", "forex", "binary", "strategy", "indicator",
-                        "pattern", "signal", "analysis", "chart", "market"]
-                if not any(k in text for k in kws):
-                    continue
+                core_kws = [
+                    "trading", "forex", "binary", "strategy", "indicator",
+                    "pattern", "signal", "analysis", "chart", "market",
+                    "resistance", "support", "breakout", "reversal", "momentum",
+                    "candle", "trend", "price action", "trader", "technique",
+                ]
+                kw_hits = sum(1 for k in core_kws if k in text)
+                if kw_hits == 0:
+                    continue  # off-topic — discard
                 direction = self._direction(text)
+                # Tiered confidence by keyword density
+                if kw_hits >= 4:
+                    conf = 0.50
+                elif kw_hits >= 2:
+                    conf = 0.40
+                else:
+                    conf = 0.28
+                tags = ["news", category, "knowledge", "from_worker"]
+                if conf < 0.35:
+                    tags.append("supplementary")
                 results.append({
                     "node_type": node_type, "concept": f"[News] {title[:120]}",
                     "data": {
                         "topic": topic, "title": title, "summary": desc,
                         "category": category, "direction_bias": direction,
+                        "quality_score": kw_hits,
                     },
-                    "confidence": 0.40, "evidence_count": 1, "contradiction_count": 0,
+                    "confidence": conf, "evidence_count": 1, "contradiction_count": 0,
                     "activation": 1.0, "source": "google_news_worker",
                     "asset": None,
-                    "tags": ["news", category, "knowledge", "from_worker"],
+                    "tags": tags,
                     "edges": [],
                 })
             return results

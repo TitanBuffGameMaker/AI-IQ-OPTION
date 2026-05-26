@@ -336,7 +336,7 @@ class KnowledgeResearcher:
                 "source_url":     page_url,
                 "direction_bias": direction,
             },
-            confidence=0.55,   # Wikipedia is reliable → higher starting confidence
+            confidence=0.65,   # Wikipedia: structured, peer-reviewed → high starting confidence
             evidence_count=1,
             source="wikipedia",
             asset=self.asset,
@@ -377,17 +377,36 @@ class KnowledgeResearcher:
         self, title: str, summary: str, topic: str,
         category: str, node_type: NodeType,
     ) -> Optional[KnowledgeNode]:
+        if len(title) < 15 or len(summary) < 30:
+            return None  # too short to be useful
+
         text = (title + " " + summary).lower()
-        keywords = ["trading", "forex", "binary", "strategy", "technique",
-                    "indicator", "pattern", "signal", "analysis", "chart",
-                    "market", "trader", "candle", "trend"]
-        if not any(kw in text for kw in keywords):
-            return None
+
+        # Quality scoring: count trading-relevant keywords
+        core_keywords = [
+            "trading", "forex", "binary", "strategy", "technique",
+            "indicator", "pattern", "signal", "analysis", "chart",
+            "market", "trader", "candle", "trend", "price action",
+            "resistance", "support", "breakout", "reversal", "momentum",
+        ]
+        kw_hits = sum(1 for kw in core_keywords if kw in text)
+        if kw_hits == 0:
+            return None  # completely off-topic — discard
 
         direction = self._extract_direction(text)
         tags = ["news", category, "knowledge"]
         if direction:
             tags.append(direction + "_signal")
+
+        # Tiered confidence based on keyword density
+        # ≥4 hits → high quality (0.50), 2-3 → normal (0.40), 1 → supplementary (0.28)
+        if kw_hits >= 4:
+            conf = 0.50
+        elif kw_hits >= 2:
+            conf = 0.40
+        else:
+            conf = 0.28
+            tags.append("supplementary")  # low-quality: brain treats as weak prior only
 
         return KnowledgeNode(
             node_type=node_type,
@@ -398,8 +417,9 @@ class KnowledgeResearcher:
                 "summary":        summary[:300],
                 "category":       category,
                 "direction_bias": direction,
+                "quality_score":  kw_hits,
             },
-            confidence=0.40,
+            confidence=conf,
             evidence_count=1,
             source="google_news_research",
             asset=self.asset,

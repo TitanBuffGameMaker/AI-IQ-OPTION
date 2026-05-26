@@ -17,22 +17,45 @@ import requests
 logger = logging.getLogger(__name__)
 
 # Free RSS feeds – no API key needed
+# Ordered best-quality-first: forex-specialist sites ranked higher
 RSS_FEEDS = {
-    "reuters_forex": "https://feeds.reuters.com/reuters/businessNews",
+    # Forex-specialist sources (highest relevance)
+    "babypips":        "https://www.babypips.com/news/feed",
+    "fxstreet":        "https://rss.fxstreet.com/news",
+    "dailyfx":         "https://www.dailyfx.com/feeds/all",
+    "forexlive":       "https://www.forexlive.com/feed/news",
+    # General financial (broader but still relevant)
+    "reuters_forex":   "https://feeds.reuters.com/reuters/businessNews",
     "investing_forex": "https://www.investing.com/rss/news_25.rss",
-    "forexlive": "https://www.forexlive.com/feed/news",
-    "marketwatch": "https://feeds.marketwatch.com/marketwatch/realtimeheadlines/",
-    "cnbc_forex": "https://www.cnbc.com/id/10037090/device/rss/rss.html",
+    "marketwatch":     "https://feeds.marketwatch.com/marketwatch/realtimeheadlines/",
+    "cnbc_forex":      "https://www.cnbc.com/id/10037090/device/rss/rss.html",
+    "investopedia":    "https://www.investopedia.com/feedbuilder/feed/getfeed?feedName=rss_headline",
+}
+
+# Quality weight per source (used when scoring nodes)
+SOURCE_QUALITY: dict = {
+    "babypips":        0.80,   # forex education + analysis
+    "fxstreet":        0.80,   # forex-only news
+    "dailyfx":         0.75,   # forex analysis
+    "forexlive":       0.70,   # live forex news
+    "reuters_forex":   0.65,
+    "investing_forex": 0.60,
+    "marketwatch":     0.55,
+    "cnbc_forex":      0.50,
+    "investopedia":    0.70,   # educational finance
 }
 
 ASSET_KEYWORDS = {
-    "EURUSD": ["EUR", "USD", "euro", "dollar", "ECB", "Fed", "Federal Reserve",
-               "European Central Bank", "eurozone", "EURUSD"],
-    "GBPUSD": ["GBP", "USD", "pound", "sterling", "dollar", "Bank of England",
-               "BOE", "GBPUSD"],
-    "USDJPY": ["JPY", "USD", "yen", "dollar", "Bank of Japan", "BOJ", "USDJPY"],
-    "BTCUSD": ["bitcoin", "BTC", "crypto", "cryptocurrency", "BTCUSD"],
-    "GOLD":   ["gold", "XAU", "precious metals", "safe haven"],
+    "EURUSD":  ["EUR", "USD", "euro", "dollar", "ECB", "Fed", "Federal Reserve",
+                "European Central Bank", "eurozone", "EURUSD"],
+    "GBPUSD":  ["GBP", "USD", "pound", "sterling", "dollar", "Bank of England",
+                "BOE", "GBPUSD"],
+    "USDJPY":  ["JPY", "USD", "yen", "dollar", "Bank of Japan", "BOJ", "USDJPY"],
+    "EURJPY":  ["EUR", "JPY", "euro", "yen", "ECB", "Bank of Japan", "EURJPY"],
+    "USDAED":  ["AED", "USD", "dirham", "dollar", "UAE", "USDAED"],
+    "AUDUSD":  ["AUD", "USD", "aussie", "dollar", "RBA", "Reserve Bank Australia"],
+    "BTCUSD":  ["bitcoin", "BTC", "crypto", "cryptocurrency", "BTCUSD"],
+    "GOLD":    ["gold", "XAU", "precious metals", "safe haven"],
 }
 
 HIGH_IMPACT_KEYWORDS = [
@@ -194,19 +217,22 @@ class NewsFetcher:
         """Score article for relevance and sentiment."""
         text = (article.title + " " + article.summary).lower()
 
+        # Source quality multiplier (forex-specialist sites score higher)
+        quality = SOURCE_QUALITY.get(article.source, 0.50)
+
         # Relevance: does it mention our asset?
         for asset, keywords in ASSET_KEYWORDS.items():
             matches = sum(1 for kw in keywords if kw.lower() in text)
             if matches > 0:
                 article.matched_assets.append(asset)
                 if asset == self.asset:
-                    article.relevance_score += 0.3 + matches * 0.1
+                    article.relevance_score += (0.3 + matches * 0.1) * quality
 
         # High impact check
         high_matches = sum(1 for kw in HIGH_IMPACT_KEYWORDS if kw.lower() in text)
         if high_matches > 0:
             article.is_high_impact = True
-            article.relevance_score += 0.2 + high_matches * 0.05
+            article.relevance_score += (0.2 + high_matches * 0.05) * quality
 
         # Sentiment analysis (simple lexicon-based)
         article.sentiment = self._score_sentiment(text)
