@@ -33,8 +33,8 @@ class CapitalGuard:
     # ── Min confidence ตาม account + trade count ─────────────────────────────
     #  PRACTICE: เริ่มต่ำ เพื่อให้ AI เรียนรู้ได้เยอะ
     #  REAL: เริ่มสูงกว่า → เทรดเฉพาะเมื่อมั่นใจจริงๆ
-    _CONF_PRACTICE = [(0, 0.30), (20, 0.40), (50, 0.50)]
-    _CONF_REAL     = [(0, 0.55), (10, 0.58), (30, 0.62), (100, 0.65)]
+    _CONF_PRACTICE = [(0, 0.35), (20, 0.45), (50, 0.55), (100, 0.60)]
+    _CONF_REAL     = [(0, 0.58), (10, 0.62), (30, 0.65), (100, 0.68)]
 
     def __init__(self, account_type: str = "PRACTICE"):
         self.account_type = (account_type or "PRACTICE").upper()

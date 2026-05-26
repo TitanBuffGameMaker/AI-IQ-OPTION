@@ -2305,7 +2305,10 @@ def _ai_loop():
 
 
 # ── Startup: init all components ──────────────────────────────────────────────
-OTC_ASSETS = ["EUR/USD (OTC)", "GBP/USD (OTC)", "AUD/USD (OTC)", "EUR/JPY (OTC)"]
+OTC_ASSETS = [
+    "EUR/USD (OTC)", "GBP/USD (OTC)", "AUD/USD (OTC)",
+    "EUR/JPY (OTC)", "USD/AED (OTC)",
+]
 
 # IQ Option API names for OTC assets – tries each in order until one works.
 OTC_ASSET_MAP: Dict[str, List[str]] = {
@@ -2313,6 +2316,7 @@ OTC_ASSET_MAP: Dict[str, List[str]] = {
     "GBP/USD (OTC)": ["GBPUSD-OTC", "GBPUSD_otc", "frxGBPUSD", "GBPUSD"],
     "AUD/USD (OTC)": ["AUDUSD-OTC", "AUDUSD_otc", "frxAUDUSD", "AUDUSD"],
     "EUR/JPY (OTC)": ["EURJPY-OTC", "EURJPY_otc", "frxEURJPY", "EURJPY"],
+    "USD/AED (OTC)": ["USDAED-OTC", "USDAED_otc", "frxUSDAED", "USDAED"],
 }
 
 # Sanity-check price ranges per asset.  Prices outside these bounds mean
@@ -2322,6 +2326,7 @@ PRICE_RANGES: Dict[str, tuple] = {
     "GBP/USD (OTC)": (1.10, 1.75),
     "AUD/USD (OTC)": (0.50, 0.90),
     "EUR/JPY (OTC)": (130.0, 200.0),   # EUR/JPY is ~184 in 2025-2026
+    "USD/AED (OTC)": (3.50, 3.90),     # USD/AED is ~3.67 in 2026
 }
 
 # Cache: display_name → resolved api_name (once found, reuse)
@@ -2624,6 +2629,10 @@ def _price_loop():
 def start_server(host: str = "0.0.0.0", port: int = 8000):
     setup_logging(log_dir=config.LOG_DIR)
     logger.info("Starting web dashboard at http://%s:%d", host, port)
+    import sys
+    if sys.platform == "win32":
+        import asyncio as _asyncio
+        _asyncio.set_event_loop_policy(_asyncio.WindowsSelectorEventLoopPolicy())
     uvicorn.run(app, host=host, port=port, log_level="warning")
 
 
