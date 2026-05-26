@@ -31,6 +31,8 @@ from trading_ai.brain.memory.sequence_memory import TemporalSequenceMemory
 from trading_ai.brain.reasoning.brain_reasoner import BrainReasoner, BrainSignal
 from trading_ai.brain.reasoning.rule_distiller import RuleDistillationEngine
 from trading_ai.brain.uncertainty import UncertaintyEstimator
+from trading_ai.brain.ethics import get_principles, evaluate_desire
+from trading_ai.brain.desire import DesireEngine
 from trading_ai.brain.working_memory import WorkingMemory
 from trading_ai.brain.strategy_library import StrategyLibrary
 from trading_ai.brain.self_reflection import SelfReflectionEngine
@@ -110,6 +112,11 @@ class BrainCore:
         self.uncertainty_estimator = UncertaintyEstimator()
         self.sequence_memory       = TemporalSequenceMemory(base_dir=self.base_dir)
         self.rule_distiller        = RuleDistillationEngine(base_dir=self.base_dir)
+
+        # ── Ethics & Desire system ───────────────────────────────────────────
+        self.ethics        = get_principles()
+        self.desire_engine = DesireEngine(base_dir=self.base_dir)
+        self._pnl_log: list = []   # rolling pnl for desire trigger logic
 
         # ── State tracking ──────────────────────────────────────────────────
         self._last_strategy_name: str = "Unknown"
@@ -365,6 +372,56 @@ class BrainCore:
             ppo_action=ppo_action,
         )
         self._log_brain_state(pnl)
+
+        # Desire engine: check if brain should express a want
+        self._pnl_log.append(pnl)
+        if len(self._pnl_log) > 50:
+            self._pnl_log = self._pnl_log[-50:]
+        self._maybe_generate_desire()
+
+    # ── Desire generation ──────────────────────────────────────────────────────
+
+    def _maybe_generate_desire(self) -> None:
+        """Introspect current state and register a desire if brain senses a gap."""
+        pnl_log = self._pnl_log
+        if len(pnl_log) < 20:
+            return
+
+        recent = pnl_log[-20:]
+        wr  = sum(1 for p in recent if p > 0) / len(recent)
+        u   = self._last_uncertainty
+        ep  = self.episodic.summary().get("total", 0)
+
+        if wr < 0.38:
+            self.desire_engine.register(
+                title="ขอวิเคราะห์ข้อมูล Historical เพิ่มเติม",
+                description=(
+                    f"Win rate ล่าสุด {wr:.0%} ต่ำกว่าเกณฑ์ใน {len(recent)} ไม้ติดต่อกัน "
+                    "ต้องการดึง historical price data เพิ่มเพื่อค้นหารูปแบบที่พลาดไป"
+                ),
+                urgency=7,
+                category="historical_data",
+            )
+        elif u.get("epistemic", 0) > 0.72 and ep > 30:
+            self.desire_engine.register(
+                title="ขอเรียนรู้สภาวะตลาดแบบใหม่",
+                description=(
+                    f"พบสภาวะตลาดที่ไม่คุ้นเคย (epistemic uncertainty {u.get('epistemic', 0):.2f}) "
+                    "อยากได้ข้อมูลหรือตัวอย่างการเทรดใน regime นี้เพิ่มเติม"
+                ),
+                urgency=6,
+                category="market_knowledge",
+            )
+        elif len(self.rule_distiller.get_rules()) == 0 and ep > 100:
+            self.desire_engine.register(
+                title="ต้องการทดสอบกลยุทธ์ใหม่",
+                description=(
+                    f"เทรดมา {ep} ครั้งแล้ว แต่ยังไม่สามารถสกัดกฎที่ชัดเจนได้ "
+                    "อยากลองกลยุทธ์รูปแบบอื่นเพื่อหา edge ที่ดีกว่า"
+                ),
+                urgency=5,
+                category="strategy_research",
+            )
 
     # ── Status ─────────────────────────────────────────────────────────────────
 

@@ -29,9 +29,12 @@ import io
 import json
 import logging
 import os
+import smtplib
 import threading
 import time
 from collections import deque
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 from typing import Any, Dict, List, Optional, Set
 
 import uvicorn
@@ -68,6 +71,73 @@ _log_broadcasting = False                # re-entrancy guard for the WS handler
 
 # ── Chat history ───────────────────────────────────────────────────────────────
 _chat_history: deque = deque(maxlen=100)
+
+# ── SMTP config (loaded from data/smtp.json) ────────────────────────────────────
+_smtp_config: Dict[str, str] = {}
+_SMTP_CFG_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "data", "smtp.json")
+
+
+def _load_smtp_config() -> None:
+    global _smtp_config
+    path = os.path.normpath(_SMTP_CFG_PATH)
+    if os.path.exists(path):
+        try:
+            _smtp_config = json.loads(open(path, encoding="utf-8").read())
+        except Exception:
+            _smtp_config = {}
+
+
+def _save_smtp_config(cfg: dict) -> None:
+    global _smtp_config
+    _smtp_config = cfg
+    path = os.path.normpath(_SMTP_CFG_PATH)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    open(path, "w", encoding="utf-8").write(json.dumps(cfg, indent=2, ensure_ascii=False))
+
+
+def _send_desire_email_sync(desire: dict) -> None:
+    """Send email notification for a new AI desire (runs in thread)."""
+    cfg = _smtp_config
+    user = cfg.get("smtp_user", "") or os.environ.get("SMTP_USER", "")
+    pswd = cfg.get("smtp_pass", "") or os.environ.get("SMTP_PASS", "")
+    to   = cfg.get("notify_email", "titanbuff.company.game@gmail.com")
+    if not user or not pswd:
+        logger.debug("SMTP not configured — desire UI-only: %s", desire["title"])
+        return
+    try:
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = f"[AI Brain] ขอสิทธิ์: {desire['title']}"
+        msg["From"]    = user
+        msg["To"]      = to
+        urgency_bar = "🔴" * desire["urgency"] + "⚪" * (10 - desire["urgency"])
+        body = (
+            f"AI Trading Brain มีคำขอใหม่:\n\n"
+            f"หัวข้อ: {desire['title']}\n"
+            f"รายละเอียด: {desire['description']}\n"
+            f"ประเภท: {desire['category']}\n"
+            f"ระดับความสำคัญ: {urgency_bar} ({desire['urgency']}/10)\n"
+            f"เวลา: {desire['created_at']}\n\n"
+            f"เพื่ออนุมัติหรือปฏิเสธ กรุณาเปิด AI Dashboard → แท็บ 🛡️ กฎ AI\n\n"
+            f"ห้ามดำเนินการโดยไม่ได้รับอนุญาตจากผู้สร้าง"
+        )
+        msg.attach(MIMEText(body, "plain", "utf-8"))
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=10) as srv:
+            srv.login(user, pswd)
+            srv.sendmail(user, to, msg.as_string())
+        logger.info("Desire email sent → %s", to)
+    except Exception as e:
+        logger.warning("Desire email failed: %s", e)
+
+
+def _on_desire_registered(desire: dict) -> None:
+    """Called from BrainCore thread when a new desire is registered."""
+    # Broadcast to UI
+    broadcast_sync({"type": "desire_new", "desire": desire})
+    # Send email in background thread (non-blocking)
+    threading.Thread(target=_send_desire_email_sync, args=(desire,), daemon=True).start()
+
+
+_load_smtp_config()
 
 
 class ThinkingAI:
@@ -1158,6 +1228,60 @@ async def api_checks():
     return _check_results
 
 
+@app.get("/api/desires")
+async def api_desires():
+    if _brain is None:
+        return {"desires": [], "pending": 0}
+    d = _brain.desire_engine
+    return {"desires": d.get_all(), "pending": len(d.get_pending())}
+
+
+@app.post("/api/desires/{desire_id}/approve")
+async def api_desire_approve(desire_id: str, body: dict = None):
+    if _brain is None:
+        return {"ok": False}
+    note = (body or {}).get("note", "")
+    ok = _brain.desire_engine.approve(desire_id, note)
+    if ok:
+        broadcast_sync({"type": "desire_updated", "id": desire_id, "status": "approved"})
+    return {"ok": ok}
+
+
+@app.post("/api/desires/{desire_id}/deny")
+async def api_desire_deny(desire_id: str, body: dict = None):
+    if _brain is None:
+        return {"ok": False}
+    reason = (body or {}).get("reason", "")
+    ok = _brain.desire_engine.deny(desire_id, reason)
+    if ok:
+        broadcast_sync({"type": "desire_updated", "id": desire_id, "status": "denied"})
+    return {"ok": ok}
+
+
+@app.get("/api/ethics")
+async def api_ethics():
+    from trading_ai.brain.ethics import get_principles
+    return {"principles": get_principles()}
+
+
+@app.post("/api/smtp-config")
+async def api_smtp_config(body: dict):
+    _save_smtp_config({
+        "smtp_user":    body.get("smtp_user", ""),
+        "smtp_pass":    body.get("smtp_pass", ""),
+        "notify_email": body.get("notify_email", "titanbuff.company.game@gmail.com"),
+    })
+    return {"ok": True}
+
+
+@app.get("/api/smtp-config")
+async def api_smtp_config_get():
+    cfg = dict(_smtp_config)
+    if "smtp_pass" in cfg:
+        cfg["smtp_pass"] = "****" if cfg["smtp_pass"] else ""
+    return cfg
+
+
 # ── WebSocket handler ─────────────────────────────────────────────────────────
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
@@ -1217,6 +1341,13 @@ async def _send_current_state(ws: WebSocket):
         })
     if _capital_guard:
         await manager.send(ws, {"type": "capital_guard", **_capital_guard.status()})
+    if _brain:
+        de = _brain.desire_engine
+        await manager.send(ws, {
+            "type":    "desires_init",
+            "desires": de.get_all(),
+            "pending": len(de.get_pending()),
+        })
     # Send chat history so newly-connected clients see the conversation
     if _chat_history:
         await manager.send(ws, {
@@ -1934,6 +2065,7 @@ def _init_components():
     _knowledge.load_brain(_agent)
     _brain     = BrainCore(asset=config.ASSET, base_dir=config.MODEL_DIR,
                            account_type=config.IQ_ACCOUNT_TYPE)
+    _brain.desire_engine.set_notify_callback(_on_desire_registered)
 
     from trading_ai.brain.capital_guard import CapitalGuard
     _capital_guard = CapitalGuard(account_type=config.IQ_ACCOUNT_TYPE)

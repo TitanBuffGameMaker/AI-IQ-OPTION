@@ -143,6 +143,24 @@ function handleMessage(msg) {
       }
       break;
 
+    case 'desires_init':
+      renderDesires(msg.desires || []);
+      updateDesireBadge(msg.pending || 0);
+      break;
+
+    case 'desire_new':
+      if (msg.desire) {
+        prependDesire(msg.desire);
+        updateDesireBadge(document.querySelectorAll('.desire-card.pending').length);
+        showToast(`💭 AI ขอสิทธิ์: ${msg.desire.title}`, 'warn');
+      }
+      break;
+
+    case 'desire_updated':
+      markDesireResolved(msg.id, msg.status);
+      updateDesireBadge(document.querySelectorAll('.desire-card.pending').length);
+      break;
+
     case 'log':
       addLogEntry(msg);
       break;
@@ -1048,4 +1066,171 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Auto-ping keepalive every 25s
   setInterval(() => send({ type: 'ping' }), 25000);
+
+  // Load ethics principles on boot
+  loadEthicsPrinciples();
+
+  // Load SMTP config
+  loadSmtpConfig();
 });
+
+// ── Desire Engine UI ──────────────────────────────────────────────────────────
+
+function _desireUrgencyBar(u) {
+  const filled = Math.round(u);
+  return '🔴'.repeat(filled) + '⚪'.repeat(10 - filled);
+}
+
+function _desireStatusLabel(status) {
+  return { pending: '⏳ รอการอนุมัติ', approved: '✅ อนุมัติแล้ว', denied: '❌ ปฏิเสธแล้ว' }[status] || status;
+}
+
+function _buildDesireCard(d) {
+  const card = document.createElement('div');
+  card.className = `desire-card ${d.status}`;
+  card.id = `desire-${d.id}`;
+  card.innerHTML = `
+    <div class="desire-title">${d.title}</div>
+    <div class="desire-desc">${d.description}</div>
+    <div class="desire-meta">
+      <span>${_desireStatusLabel(d.status)}</span>
+      <span class="desire-urgency" title="ความสำคัญ ${d.urgency}/10">${_desireUrgencyBar(d.urgency)}</span>
+      <span>${d.created_at || ''}</span>
+    </div>
+    ${d.status === 'pending' ? `
+    <div class="desire-actions">
+      <button class="btn-approve" onclick="approveDesire('${d.id}')">✅ อนุมัติ</button>
+      <button class="btn-deny"    onclick="denyDesire('${d.id}')">❌ ปฏิเสธ</button>
+    </div>` : (d.resolve_note ? `<div style="font-size:10px;color:var(--text-muted);margin-top:4px;">หมายเหตุ: ${d.resolve_note}</div>` : '')}
+  `;
+  return card;
+}
+
+function renderDesires(desires) {
+  const list = document.getElementById('desires-list');
+  if (!list) return;
+  list.innerHTML = '';
+  if (!desires || desires.length === 0) {
+    list.innerHTML = '<div class="desires-empty">ยังไม่มีคำขอ — AI ทำงานอยู่ในขอบเขตที่กำหนด</div>';
+    return;
+  }
+  desires.forEach(d => list.appendChild(_buildDesireCard(d)));
+}
+
+function prependDesire(d) {
+  const list = document.getElementById('desires-list');
+  if (!list) return;
+  const empty = list.querySelector('.desires-empty');
+  if (empty) empty.remove();
+  list.insertBefore(_buildDesireCard(d), list.firstChild);
+}
+
+function markDesireResolved(id, status) {
+  const card = document.getElementById(`desire-${id}`);
+  if (!card) return;
+  card.className = `desire-card ${status}`;
+  const actions = card.querySelector('.desire-actions');
+  if (actions) {
+    actions.innerHTML = `<span style="font-size:10px;color:var(--text-muted)">${_desireStatusLabel(status)}</span>`;
+  }
+}
+
+function updateDesireBadge(count) {
+  const badge = document.getElementById('desire-pending-count');
+  if (!badge) return;
+  if (count > 0) {
+    badge.textContent = count;
+    badge.style.display = 'inline-flex';
+  } else {
+    badge.style.display = 'none';
+  }
+}
+
+async function approveDesire(id) {
+  try {
+    const r = await fetch(`/api/desires/${id}/approve`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ note: 'อนุมัติโดยผู้สร้าง' }),
+    });
+    const j = await r.json();
+    if (j.ok) showToast('✅ อนุมัติคำขอแล้ว', 'success');
+  } catch (e) { showToast('เกิดข้อผิดพลาด', 'error'); }
+}
+
+async function denyDesire(id) {
+  const reason = prompt('เหตุผลในการปฏิเสธ (ไม่บังคับ):') || 'ปฏิเสธโดยผู้สร้าง';
+  try {
+    const r = await fetch(`/api/desires/${id}/deny`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reason }),
+    });
+    const j = await r.json();
+    if (j.ok) showToast('❌ ปฏิเสธคำขอแล้ว', 'warn');
+  } catch (e) { showToast('เกิดข้อผิดพลาด', 'error'); }
+}
+
+// ── Ethics Principles UI ──────────────────────────────────────────────────────
+
+async function loadEthicsPrinciples() {
+  try {
+    const r = await fetch('/api/ethics');
+    const j = await r.json();
+    renderEthics(j.principles || []);
+  } catch (e) { /* silent */ }
+}
+
+function renderEthics(principles) {
+  const list = document.getElementById('ethics-list');
+  if (!list) return;
+  list.innerHTML = '';
+  principles.forEach(p => {
+    const el = document.createElement('div');
+    el.className = 'ethics-principle';
+    el.innerHTML = `
+      <span class="ethics-icon">${p.icon}</span>
+      <div class="ethics-body">
+        <div class="ethics-title">${p.title}</div>
+        <div class="ethics-desc">${p.desc}</div>
+      </div>
+    `;
+    list.appendChild(el);
+  });
+}
+
+// ── SMTP Config UI ────────────────────────────────────────────────────────────
+
+async function loadSmtpConfig() {
+  try {
+    const r = await fetch('/api/smtp-config');
+    const j = await r.json();
+    const u = document.getElementById('smtp-user');
+    const n = document.getElementById('smtp-notify');
+    if (u && j.smtp_user) u.value = j.smtp_user;
+    if (n && j.notify_email) n.value = j.notify_email;
+  } catch (e) { /* silent */ }
+}
+
+async function saveSmtpConfig() {
+  const user  = document.getElementById('smtp-user').value.trim();
+  const pass  = document.getElementById('smtp-pass').value.trim();
+  const email = document.getElementById('smtp-notify').value.trim();
+  const status = document.getElementById('smtp-status');
+  try {
+    const r = await fetch('/api/smtp-config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ smtp_user: user, smtp_pass: pass, notify_email: email }),
+    });
+    const j = await r.json();
+    if (j.ok) {
+      status.textContent = '✅ บันทึกแล้ว — อีเมลพร้อมใช้งาน';
+      status.style.color = 'var(--green)';
+      document.getElementById('smtp-pass').value = '';
+    }
+  } catch (e) {
+    status.textContent = '❌ บันทึกไม่สำเร็จ';
+    status.style.color = 'var(--red)';
+  }
+}

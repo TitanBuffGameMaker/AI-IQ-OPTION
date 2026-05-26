@@ -230,6 +230,7 @@
       <div class="sidebar-tab active" data-tab="brain"    onclick="switchTab('brain')">🧠 Brain</div>
       <div class="sidebar-tab" data-tab="history"         onclick="switchTab('history')">📋 History</div>
       <div class="sidebar-tab" data-tab="settings"        onclick="switchTab('settings')">⚙️ Settings</div>
+      <div class="sidebar-tab" data-tab="rules"           onclick="switchTab('rules')">🛡️ กฎ AI</div>
     </div>
 
     <div class="sidebar-content">
@@ -527,6 +528,52 @@
         </div>
 
       </div>
+
+      <!-- ═══ Rules / AI Ethics Tab ═══════════════════════════════════════════ -->
+      <div id="tab-rules" class="tab-panel">
+
+        <!-- AI Desires section -->
+        <div class="rules-section">
+          <div class="rules-section-head">
+            <span>💭 คำขอจาก AI</span>
+            <span class="desire-pending-badge" id="desire-pending-count" style="display:none">0</span>
+          </div>
+          <div id="desires-list" class="desires-list">
+            <div class="desires-empty">ยังไม่มีคำขอ — AI ทำงานอยู่ในขอบเขตที่กำหนด</div>
+          </div>
+        </div>
+
+        <!-- Ethics principles -->
+        <div class="rules-section" style="margin-top:12px;">
+          <div class="rules-section-head">📜 หลักการ (Ethics)</div>
+          <div id="ethics-list" class="ethics-list">
+            <!-- populated by JS -->
+          </div>
+        </div>
+
+        <!-- SMTP config -->
+        <div class="rules-section" style="margin-top:12px;">
+          <div class="rules-section-head">📧 การแจ้งเตือนทางอีเมล</div>
+          <div style="padding:8px 0 4px;font-size:10px;color:var(--text-muted);">
+            รับอีเมลเมื่อ AI ส่งคำขอ (ต้องใช้ Gmail App Password)
+          </div>
+          <div class="form-group" style="margin-bottom:8px;">
+            <label class="form-label">Gmail ผู้ส่ง (SMTP User)</label>
+            <input id="smtp-user" type="email" class="form-control" placeholder="your@gmail.com">
+          </div>
+          <div class="form-group" style="margin-bottom:8px;">
+            <label class="form-label">Gmail App Password (16 หลัก)</label>
+            <input id="smtp-pass" type="password" class="form-control" placeholder="xxxx xxxx xxxx xxxx">
+          </div>
+          <div class="form-group" style="margin-bottom:8px;">
+            <label class="form-label">อีเมลผู้รับแจ้งเตือน</label>
+            <input id="smtp-notify" type="email" class="form-control" value="titanbuff.company.game@gmail.com">
+          </div>
+          <button class="btn-save" onclick="saveSmtpConfig()">💾 บันทึกการตั้งค่า Email</button>
+          <div id="smtp-status" style="margin-top:6px;font-size:10px;color:var(--text-muted);"></div>
+        </div>
+
+      </div><!-- /#tab-rules -->
 
 
     </div><!-- /.sidebar-content -->

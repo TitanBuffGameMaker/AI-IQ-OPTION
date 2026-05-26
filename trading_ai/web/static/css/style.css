@@ -1229,3 +1229,109 @@ body {
 }
 .chat-send-btn:hover  { background: #6c3de8; }
 .chat-send-btn:active { transform: scale(0.9); }
+
+/* ── Rules / AI Ethics Tab ─────────────────────────────────── */
+.rules-section {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.rules-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  background: rgba(124, 77, 255, 0.08);
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--purple);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.desire-pending-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  background: var(--red);
+  color: #fff;
+  border-radius: 9px;
+  font-size: 10px;
+  font-weight: 700;
+  animation: pulseDot 1.5s infinite;
+}
+
+.desires-list { padding: 8px; display: flex; flex-direction: column; gap: 6px; }
+.desires-empty { padding: 12px 8px; font-size: 11px; color: var(--text-muted); text-align: center; }
+
+.desire-card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-size: 11px;
+}
+.desire-card.pending  { border-left: 3px solid var(--gold); }
+.desire-card.approved { border-left: 3px solid var(--green); opacity: 0.75; }
+.desire-card.denied   { border-left: 3px solid var(--red);   opacity: 0.65; }
+
+.desire-title { font-size: 12px; font-weight: 700; color: var(--text); margin-bottom: 4px; }
+.desire-desc  { color: var(--text-dim); line-height: 1.5; margin-bottom: 6px; font-size: 10px; }
+
+.desire-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 10px;
+  color: var(--text-muted);
+  flex-wrap: wrap;
+}
+
+.desire-urgency {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.desire-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.btn-approve, .btn-deny {
+  flex: 1;
+  padding: 4px 8px;
+  border-radius: 6px;
+  border: none;
+  font-size: 10px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+.btn-approve { background: rgba(0,200,122,0.15); color: var(--green); border: 1px solid var(--green-dim); }
+.btn-deny    { background: rgba(242,54,69,0.12);  color: var(--red);   border: 1px solid var(--red-dim); }
+.btn-approve:hover { background: rgba(0,200,122,0.3); }
+.btn-deny:hover    { background: rgba(242,54,69,0.25); }
+
+.ethics-list { padding: 6px 8px; display: flex; flex-direction: column; gap: 4px; }
+
+.ethics-principle {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 7px 8px;
+  background: rgba(255,255,255,0.025);
+  border-radius: 6px;
+  font-size: 11px;
+}
+.ethics-icon { font-size: 14px; flex-shrink: 0; margin-top: 1px; }
+.ethics-body { flex: 1; }
+.ethics-title { font-weight: 700; color: var(--text); margin-bottom: 2px; }
+.ethics-desc  { color: var(--text-dim); font-size: 10px; line-height: 1.4; }
