@@ -1483,6 +1483,17 @@ async def api_smtp_config_get():
     return cfg
 
 
+@app.get("/worker.py")
+async def serve_worker_py():
+    """Serve worker.py so the .bat file can auto-download it on first run."""
+    from fastapi.responses import FileResponse
+    path = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", "worker.py"))
+    if os.path.exists(path):
+        return FileResponse(path, media_type="text/plain", filename="worker.py")
+    from fastapi.responses import JSONResponse
+    return JSONResponse({"error": "worker.py not found on server"}, status_code=404)
+
+
 # ── WebSocket handler ─────────────────────────────────────────────────────────
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
