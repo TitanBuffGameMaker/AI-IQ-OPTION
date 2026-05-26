@@ -120,7 +120,9 @@ class TemporalTransformerEncoder(nn.Module):
             if x_seq.size(1) > self.context_len:
                 x_seq = x_seq[:, -self.context_len:]
             out = self.transformer(x_seq)
-            self._context = x_seq[:, 1:].detach()   # slide window
+            # Store full processed sequence so next call can prepend it.
+            # x_seq is already truncated to context_len, so memory is bounded.
+            self._context = x_seq.detach()
         else:
             out = self.transformer(x_seq)
 

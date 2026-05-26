@@ -19,7 +19,7 @@ import logging
 import random
 import re
 import time
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 from urllib.parse import quote
 
 import requests
