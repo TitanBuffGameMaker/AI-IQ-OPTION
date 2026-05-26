@@ -325,6 +325,41 @@
              border-radius:8px;font-size:11px;color:var(--text-muted);line-height:1.7;
              min-height:24px;"></div>
 
+        <!-- ══ Graduation Progress Card ══ -->
+        <div id="graduation-card" class="graduation-card">
+          <div class="grad-header">
+            <span id="grad-verdict">📈 กำลังพัฒนา</span>
+            <span id="grad-readiness-pct" class="grad-pct">0%</span>
+          </div>
+          <!-- Readiness bar -->
+          <div class="grad-bar-track">
+            <div class="grad-bar-fill" id="grad-bar" style="width:0%"></div>
+          </div>
+          <!-- Criteria checklist -->
+          <div id="grad-criteria" class="grad-criteria"></div>
+        </div>
+
+        <!-- ══ Fear System (REAL mode only) ══ -->
+        <div id="fear-panel" style="display:none;margin:6px 0;">
+          <div class="fear-header">
+            <span>🧠 ระบบ Amygdala (ความกลัว)</span>
+            <span id="fear-level-pct">0%</span>
+          </div>
+          <div class="fear-bar-track">
+            <div class="fear-bar-fill" id="fear-bar" style="width:0%"></div>
+          </div>
+          <div id="fear-emotion" style="font-size:10px;color:var(--text-dim);margin-top:4px;padding:0 4px;">
+            🟢 สงบ — ตัดสินใจได้ดี
+          </div>
+        </div>
+
+        <!-- ══ Neuro Sleep Status ══ -->
+        <div id="sleep-indicator" style="display:none;text-align:center;padding:8px;
+             background:rgba(124,77,255,0.12);border:1px solid var(--purple);
+             border-radius:8px;font-size:11px;color:var(--purple);margin:4px 0;">
+          💤 สมองกำลัง consolidate ความจำ (Sleep Cycle)…
+        </div>
+
         <!-- Pause warning -->
         <div id="pause-warning" style="display:none;margin:8px 0;padding:10px 12px;
              background:rgba(242,54,69,0.15);border:1px solid var(--red);border-radius:8px;

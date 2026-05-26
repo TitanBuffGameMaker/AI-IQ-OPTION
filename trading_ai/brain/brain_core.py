@@ -33,6 +33,8 @@ from trading_ai.brain.reasoning.rule_distiller import RuleDistillationEngine
 from trading_ai.brain.uncertainty import UncertaintyEstimator
 from trading_ai.brain.ethics import get_principles, evaluate_desire
 from trading_ai.brain.desire import DesireEngine
+from trading_ai.brain.graduation import GraduationSystem
+from trading_ai.brain.neuro import CLSMemory, DopamineSystem, FearSystem, SleepCycle
 from trading_ai.brain.working_memory import WorkingMemory
 from trading_ai.brain.strategy_library import StrategyLibrary
 from trading_ai.brain.self_reflection import SelfReflectionEngine
@@ -118,6 +120,17 @@ class BrainCore:
         self.desire_engine = DesireEngine(base_dir=self.base_dir)
         self._pnl_log: list = []   # rolling pnl for desire trigger logic
 
+        # ── Neuroscience-inspired modules ────────────────────────────────────
+        self.cls_memory   = CLSMemory(hippocampus_size=500)
+        self.dopamine     = DopamineSystem(alpha=0.1, surprise_scale=2.5)
+        self.fear_system  = FearSystem(account_type=self.account_type)
+        self.sleep_cycle  = SleepCycle(trigger_every=50,
+                                       on_sleep_callback=self._on_sleep_state)
+        self._is_sleeping = False
+
+        # ── Graduation system ────────────────────────────────────────────────
+        self.graduation   = GraduationSystem()
+
         # ── State tracking ──────────────────────────────────────────────────
         self._last_strategy_name: str = "Unknown"
         self._last_confidence:    float = 0.5
@@ -143,6 +156,7 @@ class BrainCore:
         new = (account_type or "PRACTICE").upper()
         self.account_type = new
         self.working_memory.set_account_type(new)
+        self.fear_system.set_account_type(new)
 
     def set_market_mode(self, mode: str) -> None:
         """Switch between 'OTC' and 'REAL' market mode.
@@ -373,11 +387,41 @@ class BrainCore:
         )
         self._log_brain_state(pnl)
 
+        # ── Neuroscience modules ─────────────────────────────────────────────
+        # Dopamine: compute RPE to amplify/dampen learning signal
+        _rpe_mult = self.dopamine.update(pnl)
+
+        # CLS hippocampus: encode this episode fast
+        self.cls_memory.encode(
+            indicators=indicator_vec[:40] if len(indicator_vec) >= 40 else indicator_vec,
+            action=action_taken,
+            pnl=pnl,
+            confidence=self._last_confidence,
+        )
+
+        # Fear system: update emotional state (active only in REAL mode)
+        self.fear_system.update(pnl)
+
+        # Sleep cycle: trigger consolidation every 50 trades
+        self.sleep_cycle.tick(self)
+
+        # Graduation: track this trade
+        self.graduation.record_trade(
+            pnl=pnl,
+            regime=self._last_regime,
+            balance=0.0,   # updated by server when balance known
+        )
+
         # Desire engine: check if brain should express a want
         self._pnl_log.append(pnl)
         if len(self._pnl_log) > 50:
             self._pnl_log = self._pnl_log[-50:]
         self._maybe_generate_desire()
+
+    # ── Sleep callback ─────────────────────────────────────────────────────────
+
+    def _on_sleep_state(self, sleeping: bool) -> None:
+        self._is_sleeping = sleeping
 
     # ── Desire generation ──────────────────────────────────────────────────────
 
@@ -494,6 +538,14 @@ class BrainCore:
             "sequence_memory":          self.sequence_memory.stats(),
             "distilled_rules":          self.rule_distiller.get_rules(),
             "distilled_rules_text":     self.rule_distiller.format_rules(),
+            # Neuroscience modules
+            "neuro_cls":                self.cls_memory.stats(),
+            "neuro_dopamine":           self.dopamine.stats(),
+            "neuro_fear":               self.fear_system.stats(),
+            "neuro_sleep":              self.sleep_cycle.stats(),
+            "is_sleeping":              self._is_sleeping,
+            # Graduation
+            "graduation":               self.graduation.evaluate(self),
         }
 
     def shutdown(self):

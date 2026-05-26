@@ -446,6 +446,75 @@ function applyBrain(msg) {
 
   // Navbar badges
   document.getElementById('brain-badge').textContent = `🧠 ${msg.graph_nodes || 0} nodes`;
+
+  // ── Graduation ────────────────────────────────────────────────────────
+  if (msg.graduation) applyGraduation(msg.graduation);
+
+  // ── Fear system ───────────────────────────────────────────────────────
+  if (msg.neuro_fear) applyFear(msg.neuro_fear);
+
+  // ── Sleep indicator ───────────────────────────────────────────────────
+  const sleepEl = document.getElementById('sleep-indicator');
+  if (sleepEl) sleepEl.style.display = msg.is_sleeping ? 'block' : 'none';
+}
+
+function applyGraduation(g) {
+  const card    = document.getElementById('graduation-card');
+  const verdict = document.getElementById('grad-verdict');
+  const pct     = document.getElementById('grad-readiness-pct');
+  const bar     = document.getElementById('grad-bar');
+  const clist   = document.getElementById('grad-criteria');
+  if (!card) return;
+
+  const readiness = g.readiness_pct || 0;
+  if (verdict) verdict.textContent = g.verdict || '';
+  if (pct)     pct.textContent     = readiness.toFixed(0) + '%';
+  if (bar)     bar.style.width     = readiness + '%';
+
+  card.classList.toggle('graduated', g.can_graduate === true);
+
+  if (clist && Array.isArray(g.criteria)) {
+    clist.innerHTML = '';
+    g.criteria.forEach(c => {
+      const row = document.createElement('div');
+      const isBonus = !c.required;
+      row.className = `grad-criterion ${c.passed ? (isBonus ? 'bonus' : 'passed') : 'failed'}`;
+      row.innerHTML = `
+        <span class="grad-criterion-check">${c.passed ? (isBonus ? '⭐' : '✅') : '○'}</span>
+        <span>${c.icon} ${c.label}</span>
+        <span class="grad-criterion-val">${c.value || ''}</span>
+      `;
+      clist.appendChild(row);
+    });
+  }
+}
+
+function applyFear(fear) {
+  const panel    = document.getElementById('fear-panel');
+  const bar      = document.getElementById('fear-bar');
+  const pct      = document.getElementById('fear-level-pct');
+  const emotionEl = document.getElementById('fear-emotion');
+  if (!panel) return;
+
+  const isReal = fear.account_type === 'REAL';
+  panel.style.display = isReal ? 'block' : 'none';
+  if (!isReal) return;
+
+  const level = (fear.fear_level || 0) * 100;
+  if (pct)      pct.textContent    = level.toFixed(0) + '%';
+  if (emotionEl) emotionEl.textContent = fear.emotion || '';
+
+  if (bar) {
+    bar.style.width      = level + '%';
+    bar.style.background = level < 30 ? 'var(--green)'
+                         : level < 60 ? 'var(--gold)'
+                         :              'var(--red)';
+  }
+
+  // Cooldown warning
+  if (fear.in_cooldown && fear.cooldown_remaining_min > 0) {
+    setStatus(`⏸️ Fear Cooldown: ${fear.cooldown_reason} (${fear.cooldown_remaining_min.toFixed(0)} นาที)`, 'warn');
+  }
 }
 
 function applyBrainAge(msg) {

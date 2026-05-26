@@ -1335,3 +1335,86 @@ body {
 .ethics-body { flex: 1; }
 .ethics-title { font-weight: 700; color: var(--text); margin-bottom: 2px; }
 .ethics-desc  { color: var(--text-dim); font-size: 10px; line-height: 1.4; }
+
+/* ── Graduation Card ─────────────────────────────────────────── */
+.graduation-card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  margin: 8px 0 4px;
+}
+.grad-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 6px;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text);
+}
+.grad-pct {
+  font-size: 14px;
+  font-weight: 800;
+  color: var(--purple);
+}
+.grad-bar-track {
+  height: 6px;
+  background: rgba(255,255,255,0.06);
+  border-radius: 3px;
+  overflow: hidden;
+  margin-bottom: 8px;
+}
+.grad-bar-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #7c4dff, #00c87a);
+  border-radius: 3px;
+  transition: width 0.6s ease;
+}
+.grad-criteria {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.grad-criterion {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+  padding: 3px 4px;
+  border-radius: 4px;
+}
+.grad-criterion.passed  { color: var(--green); }
+.grad-criterion.failed  { color: var(--text-muted); }
+.grad-criterion.bonus   { color: var(--gold); }
+.grad-criterion-check   { font-size: 12px; flex-shrink: 0; }
+.grad-criterion-val     { margin-left: auto; font-size: 9px; color: var(--text-muted); }
+
+/* Graduated state */
+.graduation-card.graduated {
+  border-color: var(--green);
+  background: rgba(0, 200, 122, 0.07);
+}
+.graduation-card.graduated .grad-pct { color: var(--green); }
+
+/* ── Fear System Bar ─────────────────────────────────────────── */
+.fear-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--text-dim);
+  margin-bottom: 4px;
+}
+.fear-bar-track {
+  height: 5px;
+  background: rgba(255,255,255,0.06);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.fear-bar-fill {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.4s ease, background 0.4s ease;
+}
