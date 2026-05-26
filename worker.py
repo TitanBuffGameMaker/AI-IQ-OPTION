@@ -113,7 +113,7 @@ CATEGORY_NODE_TYPE = {
 
 WIKIPEDIA_API   = "https://en.wikipedia.org/api/rest_v1/page/summary/{title}"
 GOOGLE_NEWS_RSS = "https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en"
-RESEARCH_COOLDOWN = 1200   # 20 min between research sessions
+RESEARCH_COOLDOWN = 120    # 2 min between research sessions
 
 
 class WorkerResearcher:
@@ -145,7 +145,7 @@ class WorkerResearcher:
         category  = self._categories[self._category_idx % len(self._categories)]
         self._category_idx += 1
         topics    = RESEARCH_TOPICS[category]
-        chosen    = random.sample(topics, min(3, len(topics)))
+        chosen    = random.sample(topics, min(6, len(topics)))
         node_type = CATEGORY_NODE_TYPE.get(category, "rule")
         nodes: List[dict] = []
 
@@ -156,10 +156,10 @@ class WorkerResearcher:
             if node:
                 nodes.append(node)
             news = self._google_news_nodes(topic, category, node_type)
-            nodes.extend(news[:2])
-            if len(nodes) >= 8:
+            nodes.extend(news[:3])
+            if len(nodes) >= 20:
                 break
-            time.sleep(0.5)
+            time.sleep(0.3)
 
         logger.info("🔍 Research เสร็จ: %d nodes (category=%s)", len(nodes), category)
         return nodes
@@ -430,9 +430,9 @@ async def run_worker(server_url: str, worker_name: str):
 
                 # ── Background research task ───────────────────────────────
                 async def research_loop():
-                    """ค้นหาความรู้ทุก 20 นาที และส่งให้ server อัตโนมัติ"""
+                    """ค้นหาความรู้ทุก 2 นาที และส่งให้ server อัตโนมัติ"""
                     while True:
-                        await asyncio.sleep(30)   # wait 30s after connect before first research
+                        await asyncio.sleep(10)   # wait 10s after connect before first research
                         if researcher.should_research():
                             try:
                                 nodes = await asyncio.get_event_loop().run_in_executor(
@@ -447,7 +447,7 @@ async def run_worker(server_url: str, worker_name: str):
                                     logger.info("📚 ส่ง %d knowledge nodes ให้ server", len(nodes))
                             except Exception as exc:
                                 logger.error("Research loop error: %s", exc)
-                        await asyncio.sleep(60)
+                        await asyncio.sleep(30)
 
                 research_task = asyncio.create_task(research_loop())
 

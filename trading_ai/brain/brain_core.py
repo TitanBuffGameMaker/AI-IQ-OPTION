@@ -78,9 +78,9 @@ class BrainCore:
     ULTRA Brain — orchestrates all AI subsystems
     """
 
-    INTERNET_REFRESH_INTERVAL = 1800   # 30 min — news fetch
-    RESEARCH_INTERVAL         = 3600   # 1 hour — asset-specific web research
-    KNOWLEDGE_INTERVAL        = 1500   # 25 min — trading-knowledge research
+    INTERNET_REFRESH_INTERVAL = 300    # 5 min — news fetch
+    RESEARCH_INTERVAL         = 300    # 5 min — asset-specific web research
+    KNOWLEDGE_INTERVAL        = 120    # 2 min — trading-knowledge research
                                        # (techniques, strategies, concepts)
 
     def __init__(self, asset: str = None, base_dir: str = None,
@@ -745,7 +745,7 @@ class BrainCore:
                 except Exception as exc:
                     logger.debug("KnowledgeResearcher error: %s", exc)
 
-            self._stop_event.wait(timeout=60)
+            self._stop_event.wait(timeout=30)
 
     def _log_brain_state(self, pnl: float):
         direction = "WIN" if pnl > 0 else "LOSS"

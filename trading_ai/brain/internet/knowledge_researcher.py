@@ -146,9 +146,9 @@ class KnowledgeResearcher:
     """
 
     REQUEST_TIMEOUT          = 10
-    SEARCH_COOLDOWN          = 1200   # 20 min between research sessions
-    MAX_NODES_PER_SESSION    = 8
-    TOPICS_PER_SESSION       = 3      # sample N topics from the chosen category
+    SEARCH_COOLDOWN          = 120    # 2 min between research sessions
+    MAX_NODES_PER_SESSION    = 20
+    TOPICS_PER_SESSION       = 6      # sample N topics from the chosen category
 
     def __init__(self, asset: str = "EURUSD"):
         self.asset = asset
