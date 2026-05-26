@@ -1430,7 +1430,7 @@ function downloadWorkerBat() {
 
   const batContent = [
     '@echo off',
-    'setlocal enabledelayedexpansion',   // ← แก้ bug ตัวแปรว่างใน if block
+    'setlocal enabledelayedexpansion',
     'chcp 65001 > nul',
     'title AI Trading Worker',
     'echo.',
@@ -1464,6 +1464,16 @@ function downloadWorkerBat() {
     'echo [OK] พบ Python:',
     '!PYTHON! --version',
     '',
+    'REM ── ตรวจสอบ worker.py ─────────────────────────────',
+    'if not exist "%~dp0worker.py" (',
+    '    echo.',
+    '    echo [ERROR] ไม่พบ worker.py^^!',
+    '    echo กรุณาดาวน์โหลด worker.py จาก dashboard แล้ววางในโฟลเดอร์เดียวกัน',
+    '    pause',
+    '    exit /b 1',
+    ')',
+    'echo [OK] พบ worker.py',
+    '',
     'REM ── โหลด/บันทึก Server URL ─────────────────────────',
     'set CONFIG=%~dp0worker_server.txt',
     '',
@@ -1491,23 +1501,6 @@ function downloadWorkerBat() {
     'echo กำลังติดตั้ง dependencies...',
     '!PYTHON! -m pip install websockets torch numpy requests --quiet --upgrade',
     '',
-    'REM ── Download worker.py ถ้ายังไม่มี ──────────────────',
-    'if not exist "%~dp0worker.py" (',
-    '    echo.',
-    '    echo worker.py ไม่พบ กำลัง download จาก server...',
-    '    set "_HTTP=!SERVER_URL:ws://=http://!"',
-    '    set "_HTTP=!_HTTP:wss://=https://!"',
-    '    for /f "tokens=1,2 delims=/" %%A in ("!_HTTP:~7!") do set "_BASE=%%A"',
-    '    curl -s -L "http://!_BASE!/worker.py" -o "%~dp0worker.py" 2>nul',
-    '    if not exist "%~dp0worker.py" (',
-    '        echo [ERROR] download worker.py ไม่สำเร็จ',
-    '        echo กรุณา copy worker.py มาวางในโฟลเดอร์เดียวกันกับ start_worker.bat',
-    '        pause',
-    '        exit /b 1',
-    '    )',
-    '    echo [OK] download worker.py สำเร็จ^^!',
-    ')',
-    '',
     'echo.',
     'echo กำลังเชื่อมต่อ...',
     '!PYTHON! "%~dp0worker.py" --server "!SERVER_URL!" --name "%COMPUTERNAME%"',
@@ -1517,10 +1510,29 @@ function downloadWorkerBat() {
     'pause',
   ].join('\r\n');
 
-  const blob = new Blob([batContent], { type: 'text/plain' });
-  const a    = document.createElement('a');
-  a.href     = URL.createObjectURL(blob);
-  a.download = 'start_worker.bat';
-  a.click();
-  setStatus('⬇️ ดาวน์โหลด start_worker.bat แล้ว!', 'success');
+  // ── Download start_worker.bat ──────────────────────────────────────
+  const batBlob = new Blob([batContent], { type: 'text/plain' });
+  const batA    = document.createElement('a');
+  batA.href     = URL.createObjectURL(batBlob);
+  batA.download = 'start_worker.bat';
+  batA.click();
+
+  // ── Download worker.py จาก server พร้อมกันเลย ─────────────────────
+  setStatus('⬇️ กำลังดาวน์โหลด start_worker.bat + worker.py…', 'info');
+  fetch('/worker.py')
+    .then(r => {
+      if (!r.ok) throw new Error('server returned ' + r.status);
+      return r.blob();
+    })
+    .then(blob => {
+      const a    = document.createElement('a');
+      a.href     = URL.createObjectURL(blob);
+      a.download = 'worker.py';
+      a.click();
+      setStatus('✅ ดาวน์โหลด start_worker.bat + worker.py สำเร็จ! วางทั้ง 2 ไฟล์ไว้โฟลเดอร์เดียวกัน', 'success');
+    })
+    .catch(err => {
+      console.warn('worker.py fetch failed:', err);
+      setStatus('⬇️ ดาวน์โหลด start_worker.bat แล้ว — worker.py: ดาวน์โหลดด้วยตนเองจาก GitHub', 'warn');
+    });
 }
