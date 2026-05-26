@@ -50,7 +50,7 @@ class PrioritizedReplayBuffer:
     def add(self, obs: np.ndarray, next_obs: np.ndarray,
             action: int, reward: float, rpe_mult: float = 1.0) -> None:
         priority = (abs(reward) * rpe_mult + self.EPSILON) ** self.ALPHA
-        priority = min(priority, 10.0)   # cap to avoid runaway priorities
+        priority = min(priority, max(10.0, self._max_priority * 3))  # adaptive cap
 
         idx = self._ptr % self.capacity
         self._obs[idx]       = obs[:self.obs_size]
@@ -87,7 +87,9 @@ class PrioritizedReplayBuffer:
 
     def update_priorities(self, idxs: np.ndarray, td_errors: np.ndarray) -> None:
         for i, err in zip(idxs, td_errors):
-            self._priorities[i] = (abs(err) + self.EPSILON) ** self.ALPHA
+            p = (abs(err) + self.EPSILON) ** self.ALPHA
+            self._priorities[i] = p
+            self._max_priority = max(self._max_priority, p)
 
     def stats(self) -> dict:
         if self._size == 0:

@@ -91,7 +91,8 @@ class NASEngine:
     """
 
     def __init__(self, obs_size: int, n_actions: int,
-                 champion_config: Optional[NASConfig] = None):
+                 champion_config: Optional[NASConfig] = None,
+                 champion_agent=None):
         self._obs_size   = obs_size
         self._n_actions  = n_actions
         self._generation = 1
@@ -102,6 +103,7 @@ class NASEngine:
         self.best_ever_config: NASConfig = NASConfig(**asdict(self.champion_config))
         self.best_ever_score:  float     = 0.50
         self.recommended_upgrade: Optional[NASConfig] = None
+        self._champion_agent = champion_agent  # for weight transfer to same-arch challengers
 
         self._challengers: List[Challenger] = []
         self._history: List[Dict] = []
@@ -121,6 +123,24 @@ class NASEngine:
 
     def _make_challenger(self, cfg: NASConfig) -> Challenger:
         agent = self._create_agent(cfg)
+        # Transfer champion weights when architectures match (same hidden_size).
+        # This gives the challenger a head-start instead of random init —
+        # only the mutated hyperparameter (dropout etc.) differs.
+        if agent is not None and self._champion_agent is not None:
+            try:
+                champ_state = self._champion_agent.network.state_dict()
+                agent_state = agent.network.state_dict()
+                compatible = {
+                    k: v for k, v in champ_state.items()
+                    if k in agent_state and agent_state[k].shape == v.shape
+                }
+                if compatible:
+                    agent_state.update(compatible)
+                    agent.network.load_state_dict(agent_state, strict=False)
+                    logger.debug("NAS: transferred %d layers from champion → challenger %s",
+                                 len(compatible), cfg.label())
+            except Exception as e:
+                logger.debug("NAS weight transfer skipped: %s", e)
         return Challenger(config=cfg, agent=agent)
 
     def _create_agent(self, cfg: NASConfig):
@@ -138,6 +158,10 @@ class NASEngine:
 
     # ── Per-trade observation ─────────────────────────────────────────────────
 
+    def set_champion_agent(self, agent) -> None:
+        """Provide a reference to the live champion agent for weight transfer."""
+        self._champion_agent = agent
+
     def observe(self, obs: np.ndarray, actual_action: int, pnl: float) -> None:
         """
         Called after each trade.
@@ -150,8 +174,11 @@ class NASEngine:
         self._total_obs += 1
 
         for ch in self._challengers:
+            # Auto-revive dead challengers
             if ch.agent is None:
-                continue
+                ch.agent = self._create_agent(ch.config)
+                if ch.agent is None:
+                    continue
             try:
                 # get_confidence() returns (action, prob) — correct PPOAgent method
                 pred_action, _prob = ch.agent.get_confidence(obs.astype(np.float32))

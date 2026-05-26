@@ -423,6 +423,9 @@ class PPOAgent:
         n_upd = 0
 
         for _ in range(config.PPO_EPOCHS):
+            # Reset LSTM state once per epoch, then let it accumulate across
+            # sequential batches so temporal patterns are preserved during training.
+            self.network.reset_hidden()
             for idx in self.buffer.get_batches(config.BATCH_SIZE):
                 obs_b      = all_obs[idx]
                 nxt_b      = all_next_obs[idx]
@@ -431,8 +434,6 @@ class PPOAgent:
                 adv_b      = advantages[idx]
                 ret_b      = returns[idx]
                 old_val_b  = all_old_values[idx]
-
-                self.network.reset_hidden(obs_b.size(0))
                 new_lp, values, entropy = self.network.evaluate(obs_b, act_b)
 
                 # PPO clipped surrogate
@@ -470,6 +471,7 @@ class PPOAgent:
                 self.icm_optimizer.zero_grad()
                 loss.backward()
                 nn.utils.clip_grad_norm_(self.network.parameters(), config.MAX_GRAD_NORM)
+                nn.utils.clip_grad_norm_(self.icm.parameters(), config.MAX_GRAD_NORM)
                 self.optimizer.step()
                 self.icm_optimizer.step()
 
@@ -498,6 +500,28 @@ class PPOAgent:
             metrics["entropy"], metrics["lr"],
         )
         return metrics
+
+    def update_online(self, obs: np.ndarray, action: int, reward: float,
+                      next_obs: np.ndarray, done: bool) -> dict:
+        """
+        Lightweight single-step store+update for NAS shadow challengers.
+        Fills the rollout buffer one step at a time; triggers a full PPO
+        update once the buffer is ready.  Avoids the need for a separate
+        FastLearner instance per challenger.
+        """
+        obs_t = torch.from_numpy(obs.astype(np.float32)).unsqueeze(0).to(self.device)
+        with torch.no_grad():
+            logits, value = self.network(obs_t)
+            dist     = Categorical(logits=logits)
+            log_prob = dist.log_prob(torch.tensor([action], device=self.device))
+        self.store(
+            obs=obs, next_obs=next_obs, action=action,
+            log_prob=float(log_prob.item()), reward=float(reward),
+            value=float(value.squeeze().item()), done=bool(done),
+        )
+        if self.ready_to_update():
+            return self.update(next_obs)
+        return {}
 
     # ── Persistence ────────────────────────────────────────────────────────────
 

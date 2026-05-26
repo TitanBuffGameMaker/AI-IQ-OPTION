@@ -281,7 +281,7 @@ class BrainReasoner:
                 (ep_buy > ep_sell) == (final_action == 1),
                 (cs_buy > cs_sell) == (final_action == 1),
             ])
-            confluence_bonus = (confluence - 2) * 0.08   # 0 at baseline of 2
+            confluence_bonus = (confluence - 3) * 0.07   # neutral at 3 (random baseline ~3/7)
             final_conf = float(np.clip(final_conf + confluence_bonus, 0.0, 0.95))
             if confluence >= 4:
                 reasoning.append(f"Confluence: {confluence}/7 layers agree → strong signal")

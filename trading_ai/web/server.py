@@ -2093,6 +2093,7 @@ def _init_components():
                            account_type=config.IQ_ACCOUNT_TYPE)
     _brain.desire_engine.set_notify_callback(_on_desire_registered)
     _brain.journal.set_entry_callback(_on_journal_entry)
+    _brain.nas.set_champion_agent(_agent)   # enable weight transfer to same-arch challengers
 
     from trading_ai.brain.capital_guard import CapitalGuard
     _capital_guard = CapitalGuard(account_type=config.IQ_ACCOUNT_TYPE)

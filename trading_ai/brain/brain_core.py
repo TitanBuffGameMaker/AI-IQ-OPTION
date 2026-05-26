@@ -389,6 +389,19 @@ class BrainCore:
             for i, name in enumerate(INDICATOR_NAMES)
         }
 
+        # ── Sharpe-inspired reward shaping ──────────────────────────────────────
+        # Raw PnL is too crude — consistent +1% beats volatile +5%/-4% cycles.
+        # Normalise by rolling std so the agent learns risk-adjusted returns.
+        self._pnl_log.append(pnl)
+        if len(self._pnl_log) > 50:
+            self._pnl_log = self._pnl_log[-50:]
+        if len(self._pnl_log) >= 5:
+            pnl_arr = np.array(self._pnl_log, dtype=np.float32)
+            pnl_std = float(pnl_arr.std()) + 1e-6
+            shaped_reward = float(pnl) / pnl_std   # z-score of this trade's PnL
+        else:
+            shaped_reward = float(pnl)
+
         # ── FastLearner online update (reward scaled by Dopamine RPE) ──────────
         rpe_mult = self.dopamine.update(pnl)   # surprise → amplify learning
         if next_obs is not None and self._last_indicator_vec is not None:
@@ -399,12 +412,12 @@ class BrainCore:
                     self.fast_learner.update_online(
                         obs=obs_arr,
                         action=action_taken,
-                        reward=float(pnl) * rpe_mult,   # dopamine-scaled reward
+                        reward=shaped_reward * rpe_mult,  # Sharpe + dopamine scaled
                         next_obs=nxt_arr,
                         done=False,
                     )
             except Exception as exc:
-                logger.warning("FastLearner update error: %s", exc)  # was DEBUG
+                logger.warning("FastLearner update error: %s", exc)
 
         # ── Working memory update ────────────────────────────────────────────
         self.working_memory.update(
@@ -517,9 +530,7 @@ class BrainCore:
         )
 
         # Desire engine: check if brain should express a want
-        self._pnl_log.append(pnl)
-        if len(self._pnl_log) > 50:
-            self._pnl_log = self._pnl_log[-50:]
+        # (_pnl_log already updated above in reward shaping block)
         self._maybe_generate_desire()
 
         # ── Context intelligence ─────────────────────────────────────────────
