@@ -157,6 +157,9 @@ class BrainCore:
         if candles is not None:
             pattern_result = self.pattern_memory.lookup(candles)
 
+        # Multi-timeframe trend: synthetic 5-min trend from 1-min candles
+        mtf_trend = self._compute_mtf_trend(candles)
+
         # ── Working memory context ──────────────────────────────────────────
         wm_pattern = self.working_memory.get_recent_pattern()
         wm_attention = self.working_memory.get_active_attention(indicator_vec[:40]
@@ -183,6 +186,7 @@ class BrainCore:
             strategy_signal=strategy_signal,
             strategy_name=strategy_name,
             pattern_result=pattern_result,
+            mtf_trend=mtf_trend,
         )
 
         # ── Record this cycle's signal strength for recovery tracking ───────
@@ -423,6 +427,39 @@ class BrainCore:
             self.short_term.win_rate() * 100,
             self._last_strategy_name,
         )
+
+    @staticmethod
+    def _compute_mtf_trend(candles) -> int:
+        """
+        Compute a synthetic 5-minute trend from 1-minute candle data.
+
+        Groups every 5 consecutive 1-min candles into one synthetic 5-min bar
+        (using the last close of each group), then computes EMA(3) over the
+        resulting bars.  Returns:
+          +1  if current price > EMA(3) by > 0.03 %  → up-trend
+          -1  if current price < EMA(3) by > 0.03 %  → down-trend
+           0  otherwise (neutral / not enough data)
+        """
+        if candles is None or len(candles) < 25:
+            return 0
+        try:
+            closes = candles["close"].values[-25:]
+            # Build 5 synthetic 5-min bar closes (index 4, 9, 14, 19, 24)
+            bars = [float(closes[i * 5 + 4]) for i in range(5)]
+            # EMA(3) with alpha = 2/(3+1) = 0.5
+            alpha = 0.5
+            ema = bars[0]
+            for b in bars[1:]:
+                ema = alpha * b + (1.0 - alpha) * ema
+            current = bars[-1]
+            threshold = ema * 0.0003   # 0.03 % to filter micro-noise
+            if current > ema + threshold:
+                return 1
+            if current < ema - threshold:
+                return -1
+        except Exception:
+            pass
+        return 0
 
     @staticmethod
     def _asset_currencies(asset: str) -> List[str]:

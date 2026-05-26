@@ -129,8 +129,9 @@ class BrainReasoner:
         strategy_signal: Optional[Tuple[int, float]] = None,
         strategy_name: str = "",
         pattern_result=None,
+        mtf_trend: int = 0,   # +1 up-trend, -1 down-trend, 0 neutral (5-min context)
     ) -> BrainSignal:
-        """7-layer signal fusion + optional strategy signal boost"""
+        """8-layer signal fusion + confluence scoring + MTF trend"""
         reasoning: List[str] = []
         self._last_fired_nodes = []
         snapshot = self._vec_to_snapshot(indicator_vec, indicator_names)
@@ -170,25 +171,31 @@ class BrainReasoner:
 
         # ── Layer 7: Pattern Memory (OTC-specific) ──────────────────────────
         pattern_buy = pattern_sell = pattern_hold = 0.0
-        pattern_reason = ""
+        pat_dir = 0   # for confluence tracking
         if pattern_result is not None:
             pat_wr, pat_conf, pat_n = pattern_result
-            if pat_wr > 0.58:        # pattern historically resolves UP
+            if pat_wr > 0.58:
                 pattern_buy  = pat_conf * 2.0
-                pattern_reason = f"Pattern memory: {pat_wr:.0%} BUY ({pat_n} samples)"
-            elif pat_wr < 0.42:      # pattern historically resolves DOWN
+                pat_dir = 1
+                reasoning.append(f"Pattern memory: {pat_wr:.0%} BUY ({pat_n} samples)")
+            elif pat_wr < 0.42:
                 pattern_sell = pat_conf * 2.0
-                pattern_reason = f"Pattern memory: {1-pat_wr:.0%} SELL ({pat_n} samples)"
+                pat_dir = 2
+                reasoning.append(f"Pattern memory: {1-pat_wr:.0%} SELL ({pat_n} samples)")
             else:
                 pattern_hold = pat_conf * 0.5
-                pattern_reason = f"Pattern: mixed ({pat_wr:.0%} win rate, {pat_n} samples)"
-            if pattern_reason:
-                reasoning.append(pattern_reason)
+                reasoning.append(f"Pattern: mixed ({pat_wr:.0%} win rate, {pat_n} samples)")
+
+        # ── Layer 8: Multi-Timeframe Trend ──────────────────────────────────
+        mtf_buy = mtf_sell = 0.0
+        if mtf_trend == 1:
+            mtf_buy  = 0.8
+            reasoning.append("MTF: 5-min uptrend → BUY bias")
+        elif mtf_trend == -1:
+            mtf_sell = 0.8
+            reasoning.append("MTF: 5-min downtrend → SELL bias")
 
         # ── Regime-adaptive weights ─────────────────────────────────────────
-        # ตลาด trending: เน้น PPO + momentum
-        # ตลาด ranging: เน้น oscillators (RSI, Stoch)
-        # ตลาด volatile: ระมัดระวัง → เพิ่ม hold score
         if regime == "trending":
             ppo_weight   = 2.5
             kg_weight    = 1.2
@@ -208,14 +215,14 @@ class BrainReasoner:
 
         # ── Aggregate scores ────────────────────────────────────────────────
         buy_score  = (kg_buy * kg_weight + ep_buy + cs_buy * cs_weight +
-                      news_buy + pattern_buy +
+                      news_buy + pattern_buy + mtf_buy +
                       perf_boost * (1 if ppo_action == 1 else 0))
         sell_score = (kg_sell * kg_weight + ep_sell + cs_sell * cs_weight +
-                      news_sell + pattern_sell +
+                      news_sell + pattern_sell + mtf_sell +
                       perf_boost * (1 if ppo_action == 2 else 0))
         hold_score = kg_hold + news_hold + hold_penalty + pattern_hold
 
-        # PPO agent vote (ใหญ่ที่สุด)
+        # PPO agent vote (largest weight)
         if ppo_action == 0:
             hold_score += ppo_confidence * ppo_weight
         elif ppo_action == 1:
@@ -224,34 +231,32 @@ class BrainReasoner:
             sell_score += ppo_confidence * ppo_weight
 
         # ── Strategy signal boost (weight = 2.0) ────────────────────────────
+        strat_dir = 0
         if strategy_signal is not None:
             strat_action, strat_conf = strategy_signal
+            strat_dir = strat_action
             strat_weight = 2.0
             if strat_action == 1:
                 buy_score  += strat_conf * strat_weight
-                sname = strategy_name or "Strategy"
-                reasoning.append(f"Strategy: {sname} → BUY (conf={strat_conf:.2f})")
+                reasoning.append(f"Strategy: {strategy_name or 'Strategy'} → BUY ({strat_conf:.2f})")
             elif strat_action == 2:
                 sell_score += strat_conf * strat_weight
-                sname = strategy_name or "Strategy"
-                reasoning.append(f"Strategy: {sname} → SELL (conf={strat_conf:.2f})")
+                reasoning.append(f"Strategy: {strategy_name or 'Strategy'} → SELL ({strat_conf:.2f})")
             elif strat_action == 0:
                 hold_score += strat_conf * strat_weight * 0.5
-                reasoning.append(f"Strategy: {strategy_name or 'Strategy'} → HOLD")
 
         # ── Contradiction detection ─────────────────────────────────────────
         if buy_score > 0.5 and sell_score > 0.5:
-            # มีทั้ง buy และ sell signals ที่แรง → ลด confidence
             reasoning.append("Contradiction: mixed signals → reduce conf")
             buy_score  *= 0.7
             sell_score *= 0.7
             hold_score += 0.3
 
         # ── Final decision ──────────────────────────────────────────────────
-        total    = buy_score + sell_score + hold_score + 1e-9
-        buy_p    = buy_score / total
-        sell_p   = sell_score / total
-        hold_p   = hold_score / total
+        total  = buy_score + sell_score + hold_score + 1e-9
+        buy_p  = buy_score / total
+        sell_p = sell_score / total
+        hold_p = hold_score / total
 
         if risk_mult < 0.3 or hold_p > max(buy_p, sell_p):
             final_action = 0
@@ -263,15 +268,40 @@ class BrainReasoner:
             final_action = 2
             final_conf   = sell_p
 
-        # ── Signal smoothing (ป้องกัน flip-flop) ───────────────────────────
+        # ── Confluence scoring ───────────────────────────────────────────────
+        # Count how many independent signal layers agree on the leading direction.
+        # Each confirmed layer adds +8 % to confidence; disagreement subtracts −5 %.
+        if final_action != 0:
+            confluence = sum([
+                ppo_action == final_action,
+                strat_dir  == final_action,
+                pat_dir    == final_action,
+                mtf_trend  == (1 if final_action == 1 else -1),
+                (kg_buy > kg_sell) == (final_action == 1),
+                (ep_buy > ep_sell) == (final_action == 1),
+                (cs_buy > cs_sell) == (final_action == 1),
+            ])
+            confluence_bonus = (confluence - 2) * 0.08   # 0 at baseline of 2
+            final_conf = float(np.clip(final_conf + confluence_bonus, 0.0, 0.95))
+            if confluence >= 4:
+                reasoning.append(f"Confluence: {confluence}/7 layers agree → strong signal")
+            elif confluence <= 1:
+                reasoning.append(f"Confluence: only {confluence}/7 layers agree → weak signal")
+
+        # ── EMA-based signal smoothing (replaces hard majority vote) ────────
         self._signal_history.append(final_action)
         if len(self._signal_history) >= 3:
-            counts = {0: 0, 1: 0, 2: 0}
-            for s in self._signal_history:
-                counts[s] += 1
-            # ถ้า majority ไม่ตรงกัน → hold
-            if counts[final_action] < 2 and final_action != 0:
-                reasoning.append("Signal unstable → switching to HOLD")
+            # Exponentially weight recent signals (most recent = weight 4, prev = 2, older = 1)
+            weights = [1, 2, 4]
+            recent  = list(self._signal_history)[-3:]
+            w_buy  = sum(w for s, w in zip(recent, weights) if s == 1)
+            w_sell = sum(w for s, w in zip(recent, weights) if s == 2)
+            w_hold = sum(w for s, w in zip(recent, weights) if s == 0)
+            dominant = max(w_buy, w_sell, w_hold)
+            action_w = (w_buy if final_action == 1 else
+                        w_sell if final_action == 2 else w_hold)
+            if action_w < dominant * 0.5 and final_action != 0:
+                reasoning.append("Signal unstable (EMA) → switching to HOLD")
                 final_action = 0
                 final_conf   = 0.6
 
