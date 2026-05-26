@@ -25,6 +25,7 @@ from trading_ai.brain.memory.episodic import EpisodicMemory
 from trading_ai.brain.internet.news_fetcher import NewsFetcher
 from trading_ai.brain.internet.economic_calendar import EconomicCalendar
 from trading_ai.brain.internet.web_researcher import WebResearcher
+from trading_ai.brain.internet.knowledge_researcher import KnowledgeResearcher
 from trading_ai.brain.reasoning.brain_reasoner import BrainReasoner, BrainSignal
 from trading_ai.brain.working_memory import WorkingMemory
 from trading_ai.brain.strategy_library import StrategyLibrary
@@ -64,8 +65,10 @@ class BrainCore:
     ULTRA Brain — orchestrates all AI subsystems
     """
 
-    INTERNET_REFRESH_INTERVAL = 1800   # 30 min
-    RESEARCH_INTERVAL         = 3600   # 1 hour
+    INTERNET_REFRESH_INTERVAL = 1800   # 30 min — news fetch
+    RESEARCH_INTERVAL         = 3600   # 1 hour — asset-specific web research
+    KNOWLEDGE_INTERVAL        = 1500   # 25 min — trading-knowledge research
+                                       # (techniques, strategies, concepts)
 
     def __init__(self, asset: str = None, base_dir: str = None,
                  account_type: str = None):
@@ -79,7 +82,8 @@ class BrainCore:
 
         self.news       = NewsFetcher(asset=self.asset)
         self.calendar   = EconomicCalendar(currencies=self._asset_currencies(self.asset))
-        self.researcher = WebResearcher(asset=self.asset)
+        self.researcher           = WebResearcher(asset=self.asset)
+        self.knowledge_researcher = KnowledgeResearcher(asset=self.asset)
 
         self.reasoner = BrainReasoner(
             graph=self.graph,
@@ -336,8 +340,9 @@ class BrainCore:
 
     def _internet_loop(self):
         time.sleep(30)
-        last_news  = 0.0
-        last_res   = 0.0
+        last_news      = 0.0
+        last_res       = 0.0
+        last_knowledge = 0.0
 
         while not self._stop_event.is_set():
             now = time.time()
@@ -358,6 +363,22 @@ class BrainCore:
                     last_res = now
                 except Exception as exc:
                     logger.debug("Research error: %s", exc)
+
+            # Knowledge research: techniques, strategies, concepts (not news).
+            # Offset by 600s from the asset-news researcher so the two don't run
+            # back-to-back and saturate the brain with absorption work.
+            if (now - last_knowledge) >= self.KNOWLEDGE_INTERVAL:
+                try:
+                    new_nodes = self.knowledge_researcher.research()
+                    if new_nodes:
+                        self.reasoner.absorb_internet_knowledge(new_nodes)
+                        logger.info(
+                            "Brain learned %d new trading concepts from internet",
+                            len(new_nodes),
+                        )
+                    last_knowledge = now
+                except Exception as exc:
+                    logger.debug("KnowledgeResearcher error: %s", exc)
 
             self._stop_event.wait(timeout=60)
 

@@ -281,7 +281,8 @@ class IQOptionConnector:
                 logger.info("Trade placed: %s %s $%.2f %dmin | id=%s",
                             direction.upper(), asset, amount, duration_minutes, order_id)
                 return True, order_id
-            logger.warning("Trade rejected by IQ Option")
+            logger.warning("Trade rejected by IQ Option: %s %s $%.2f %dmin (reason=%r)",
+                           direction.upper(), asset, amount, duration_minutes, order_id)
             return False, None
         except Exception as exc:
             logger.error("place_trade error: %s", exc)
