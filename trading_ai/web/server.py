@@ -1579,6 +1579,9 @@ async def worker_endpoint(ws: WebSocket):
                         "level":   "info",
                     })
 
+            elif mtype == "ping":
+                await ws.send_text(json.dumps({"type": "pong"}))
+
             elif mtype == "knowledge_result":
                 # Worker researched knowledge from Wikipedia/Google News — inject into brain
                 global _worker_knowledge_count

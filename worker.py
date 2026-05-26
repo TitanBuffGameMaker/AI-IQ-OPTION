@@ -451,6 +451,17 @@ async def run_worker(server_url: str, worker_name: str):
 
                 research_task = asyncio.create_task(research_loop())
 
+                # ── Keepalive: ส่ง ping ทุก 15s ป้องกัน server timeout ───
+                async def keepalive_loop():
+                    while True:
+                        await asyncio.sleep(15)
+                        try:
+                            await ws.send(json.dumps({"type": "ping"}))
+                        except Exception:
+                            break  # ws ปิดแล้ว
+
+                keepalive_task = asyncio.create_task(keepalive_loop())
+
                 try:
                     async for raw in ws:
                         msg   = json.loads(raw)
@@ -458,6 +469,9 @@ async def run_worker(server_url: str, worker_name: str):
 
                         if mtype == "welcome":
                             logger.info("✅ %s | ID=%s", msg.get("message", ""), msg.get("worker_id"))
+
+                        elif mtype == "pong":
+                            pass  # server ตอบรับ ping ของเรา — connection ยังอยู่
 
                         elif mtype == "work_request":
                             logger.info("📥 ได้รับงาน PPO training…")
@@ -514,6 +528,7 @@ async def run_worker(server_url: str, worker_name: str):
                                 logger.error("On-demand research failed: %s", exc)
                 finally:
                     research_task.cancel()
+                    keepalive_task.cancel()
 
         except (ConnectionRefusedError, OSError) as exc:
             logger.warning("เชื่อมต่อไม่ได้: %s — รอ %ds", exc, reconnect_delay)
