@@ -2315,7 +2315,11 @@ OTC_ASSET_MAP: Dict[str, List[str]] = {
     "EUR/USD (OTC)": ["EURUSD-OTC", "EURUSD_otc", "frxEURUSD", "EURUSD"],
     "GBP/USD (OTC)": ["GBPUSD-OTC", "GBPUSD_otc", "frxGBPUSD", "GBPUSD"],
     "EUR/JPY (OTC)": ["EURJPY-OTC", "EURJPY_otc", "frxEURJPY", "EURJPY"],
-    "USD/AED (OTC)": ["USDAED-OTC", "USDAED_otc", "frxUSDAED", "USDAED"],
+    "USD/AED (OTC)": [
+        "USDAED-OTC", "USDAED_otc", "frxUSDAED", "USDAED",
+        "USD/AED-OTC", "USD/AED", "usdaed-otc", "usdaed",
+        "USDAED_OTC", "USD-AED-OTC",
+    ],
 }
 
 # Sanity-check price ranges per asset.  Prices outside these bounds mean
@@ -2324,7 +2328,7 @@ PRICE_RANGES: Dict[str, tuple] = {
     "EUR/USD (OTC)": (0.90, 1.45),
     "GBP/USD (OTC)": (1.10, 1.75),
     "EUR/JPY (OTC)": (130.0, 200.0),   # EUR/JPY is ~184 in 2025-2026
-    "USD/AED (OTC)": (3.50, 3.90),     # USD/AED is ~3.67 in 2026
+    "USD/AED (OTC)": (3.40, 4.00),     # USD/AED ~3.67; wider range for API variance
 }
 
 # Cache: display_name → resolved api_name (once found, reuse)
@@ -2358,23 +2362,28 @@ def _resolve_asset_name(display_name: str) -> Optional[str]:
 
     lo, hi = PRICE_RANGES.get(display_name, (0.0, 1e9))
 
+    tried = []
     for api_name in OTC_ASSET_MAP.get(display_name, []):
         try:
             with _suppress_iqapi_stdout():
                 df = _connector.get_candles(asset=api_name, timeframe_seconds=60, count=5)
             if df is None or len(df) == 0:
+                tried.append(f"{api_name}(no_data)")
                 continue
             price = float(df["close"].iloc[-1])
             if lo <= price <= hi:
                 _resolved_asset_names[display_name] = api_name
                 logger.info("Resolved %s → %s (price=%.5f)", display_name, api_name, price)
                 return api_name
-            logger.warning("Price %.5f out of range [%.2f, %.2f] for %s via %s — skipping",
-                           price, lo, hi, display_name, api_name)
-        except Exception:
+            tried.append(f"{api_name}(price={price:.4f} out_of[{lo},{hi}])")
+        except Exception as e:
+            tried.append(f"{api_name}(err:{type(e).__name__})")
             continue
 
-    logger.warning("Could not resolve API name for %s", display_name)
+    logger.warning(
+        "Could not resolve API name for %s. Tried: %s",
+        display_name, ", ".join(tried),
+    )
     return None
 
 

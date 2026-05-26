@@ -616,12 +616,22 @@ class PPOAgent:
             return False
         try:
             ckpt = torch.load(path, map_location=self.device, weights_only=False)
-            self.network.load_state_dict(ckpt["network_state"])
+            try:
+                self.network.load_state_dict(ckpt["network_state"])
+            except RuntimeError:
+                # Architecture changed (e.g. V1→V2 upgrade) — old weights are
+                # incompatible. Back up the file and start fresh so the next
+                # save() will write a clean V2 checkpoint.
+                bak = path + ".v1.bak"
+                os.replace(path, bak)
+                logger.info(
+                    "Checkpoint architecture mismatch (V1→V2 upgrade). "
+                    "Old weights backed up to %s — starting fresh with V2.", bak
+                )
+                return False
             self.optimizer.load_state_dict(ckpt["optimizer_state"])
             if "scheduler_state" in ckpt:
                 self.scheduler.load_state_dict(ckpt["scheduler_state"])
-            if "icm_state" in ckpt:
-                self.icm.load_state_dict(ckpt["icm_state"])
             self.total_steps       = ckpt.get("total_steps", 0)
             self.total_updates     = ckpt.get("total_updates", 0)
             self.total_episodes    = ckpt.get("total_episodes", 0)
