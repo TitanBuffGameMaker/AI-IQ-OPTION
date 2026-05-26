@@ -132,6 +132,17 @@ function handleMessage(msg) {
       applyCapitalGuard(msg);
       break;
 
+    case 'chat_ai':
+      appendChatBubble('ai', msg.message, msg.time || '');
+      break;
+
+    case 'chat_history':
+      if (Array.isArray(msg.entries)) {
+        msg.entries.forEach(e => appendChatBubble(e.role, e.message, e.time || '', true));
+        scrollChatToBottom();
+      }
+      break;
+
     case 'log':
       addLogEntry(msg);
       break;
@@ -801,15 +812,65 @@ function switchTab(name) {
   document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
   document.querySelector(`[data-tab="${name}"]`).classList.add('active');
   document.getElementById(`tab-${name}`).classList.add('active');
-  // Clear unread badge when user opens logs tab
-  if (name === 'logs') {
-    const badge = document.querySelector('#tab-btn-logs .log-badge-count');
-    if (badge) { badge.style.display = 'none'; badge.textContent = '0'; }
-    _logUnread = 0;
-    // Scroll to bottom
-    const ll = document.getElementById('log-list');
-    if (ll) ll.scrollTop = ll.scrollHeight;
+  // Chat: scroll to bottom on open
+  if (name === 'chat') {
+    scrollChatToBottom();
+    setTimeout(() => document.getElementById('chat-input')?.focus(), 100);
   }
+}
+
+// ── Chat ──────────────────────────────────────────────────────────────────────
+
+function sendChatMessage() {
+  const input = document.getElementById('chat-input');
+  if (!input) return;
+  const text = input.value.trim();
+  if (!text) return;
+  input.value = '';
+  appendChatBubble('user', text, _chatTime());
+  send({ type: 'chat_user', message: text });
+}
+
+function appendChatBubble(role, message, time, batch) {
+  const container = document.getElementById('chat-messages');
+  if (!container) return;
+
+  const wrap = document.createElement('div');
+  wrap.className = `chat-bubble ${role}`;
+
+  const text = document.createElement('div');
+  text.className = 'chat-text';
+  // Convert newlines and **bold** to HTML
+  text.innerHTML = _chatMarkdown(message);
+
+  const ts = document.createElement('div');
+  ts.className = 'chat-time';
+  ts.textContent = time || _chatTime();
+
+  wrap.appendChild(text);
+  wrap.appendChild(ts);
+  container.appendChild(wrap);
+
+  if (!batch) scrollChatToBottom();
+}
+
+function scrollChatToBottom() {
+  const container = document.getElementById('chat-messages');
+  if (container) container.scrollTop = container.scrollHeight;
+}
+
+function _chatTime() {
+  const d = new Date();
+  return `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
+}
+
+function _chatMarkdown(text) {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+    .replace(/\n/g, '<br>');
 }
 
 // ── Live Logs ─────────────────────────────────────────────────────────────────

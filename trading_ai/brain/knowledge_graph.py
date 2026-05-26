@@ -457,3 +457,198 @@ class KnowledgeGraph:
                 overlap = len(tags1 & tags2)
                 if overlap >= 2:
                     n1.connect(n2.node_id, EdgeType.CORRELATES, 0.3 + overlap * 0.1)
+
+    # ── Inference engine ──────────────────────────────────────────────────────
+
+    def infer_from_node(
+        self,
+        node_id: str,
+        relation_type: str = "causes",
+        max_hops: int = 2,
+    ) -> List[Tuple[KnowledgeNode, float]]:
+        """
+        Follow CAUSES/PRECEDES edges outward from a node and collect inferred nodes.
+
+        Each hop reduces confidence by 30 %:
+          hop 1: original_conf * 0.70
+          hop 2: original_conf * 0.49
+
+        Parameters
+        ----------
+        node_id       : starting node
+        relation_type : edge type to follow ("causes" or "precedes"); case-insensitive
+        max_hops      : maximum depth to traverse (default 2)
+
+        Returns
+        -------
+        List of (KnowledgeNode, inferred_confidence) — does NOT include the start node
+        """
+        start = self._nodes.get(node_id)
+        if start is None:
+            logger.debug("infer_from_node: node %s not found", node_id)
+            return []
+
+        # Normalise to EdgeType values we want to follow
+        target_types: set = set()
+        rt_lower = relation_type.lower()
+        if rt_lower in ("causes", "all"):
+            target_types.add(EdgeType.CAUSES.value)
+        if rt_lower in ("precedes", "all"):
+            target_types.add(EdgeType.PRECEDES.value)
+        if not target_types:
+            # Fall back: follow whatever was requested by string
+            target_types.add(rt_lower)
+
+        # BFS with confidence decay
+        results: List[Tuple[KnowledgeNode, float]] = []
+        visited: set = {node_id}
+        # queue items: (current_node_id, current_inferred_conf, depth)
+        queue = [(node_id, start.confidence, 0)]
+
+        while queue:
+            cur_id, cur_conf, depth = queue.pop(0)
+            cur_node = self._nodes.get(cur_id)
+            if cur_node is None:
+                continue
+
+            if depth >= max_hops:
+                continue
+
+            for edge in cur_node.edges:
+                if edge.edge_type.value not in target_types:
+                    continue
+                if edge.target_id in visited:
+                    continue
+                target = self._nodes.get(edge.target_id)
+                if target is None:
+                    continue
+
+                visited.add(edge.target_id)
+                # Confidence decays 30 % per hop
+                inferred_conf = round(cur_conf * 0.70, 4)
+                results.append((target, inferred_conf))
+
+                logger.debug(
+                    "Inferred: %s → %s (conf=%.3f, hop=%d)",
+                    cur_id, edge.target_id, inferred_conf, depth + 1,
+                )
+                queue.append((edge.target_id, inferred_conf, depth + 1))
+
+        return results
+
+    def query_with_inference(
+        self,
+        tags: Optional[List[str]] = None,
+        min_confidence: float = 0.40,
+        limit: int = 10,
+    ) -> List[KnowledgeNode]:
+        """
+        Like query() but also follows CAUSES/PRECEDES chains from matched nodes.
+
+        Inferred nodes are added with reduced confidence (minimum threshold 0.30).
+        The combined list is deduplicated and sorted by (confidence × activation).
+
+        Parameters
+        ----------
+        tags           : tag list for initial query
+        min_confidence : minimum confidence for directly matched nodes
+        limit          : maximum nodes to return (applies after dedup/sort)
+
+        Returns
+        -------
+        List[KnowledgeNode] sorted by score, up to `limit` entries
+        """
+        _INFER_MIN_CONF = 0.30  # floor for inferred nodes
+
+        # Direct matches
+        direct = self.query(tags=tags, min_confidence=min_confidence, limit=limit)
+
+        seen_ids: set = {n.node_id for n in direct}
+        combined: List[KnowledgeNode] = list(direct)
+
+        # Gather inferences from each direct match
+        for node in direct:
+            for relation in (EdgeType.CAUSES.value, EdgeType.PRECEDES.value):
+                inferred_pairs = self.infer_from_node(
+                    node.node_id, relation_type=relation, max_hops=2
+                )
+                for inf_node, inf_conf in inferred_pairs:
+                    if inf_node.node_id in seen_ids:
+                        continue
+                    if inf_conf < _INFER_MIN_CONF:
+                        continue
+                    seen_ids.add(inf_node.node_id)
+                    # Temporarily override activation-weighted score via a shallow copy
+                    # We do NOT mutate the stored node; sort key uses inf_conf directly.
+                    combined.append(inf_node)
+
+        # Sort by effective score: for inferred nodes we approximate with their
+        # current confidence × activation (same metric as query()).
+        combined.sort(key=lambda n: n.confidence * n.activation, reverse=True)
+
+        logger.debug(
+            "query_with_inference: %d direct + inferred → %d total (limit=%d)",
+            len(direct), len(combined), limit,
+        )
+        return combined[:limit]
+
+    def get_causal_chain(self, node_id: str) -> str:
+        """
+        Return a human-readable causal chain starting from node_id.
+
+        Example output:
+          "RSI Oversold → PRECEDES → Bullish Reversal (conf=0.71) → CAUSES → Price Rally (conf=0.50)"
+
+        Follows the single strongest CAUSES or PRECEDES edge at each hop,
+        up to 3 hops, to keep the description concise.
+        """
+        start = self._nodes.get(node_id)
+        if start is None:
+            return f"(node {node_id} not found)"
+
+        _CAUSAL_TYPES = {EdgeType.CAUSES.value, EdgeType.PRECEDES.value}
+        MAX_HOPS = 3
+
+        parts = [_short_concept(start.concept)]
+        current_id = node_id
+        visited = {node_id}
+
+        for _ in range(MAX_HOPS):
+            current = self._nodes.get(current_id)
+            if current is None:
+                break
+
+            # Find the strongest CAUSES or PRECEDES edge
+            best_edge = None
+            for edge in current.edges:
+                if edge.edge_type.value not in _CAUSAL_TYPES:
+                    continue
+                if edge.target_id in visited:
+                    continue
+                if best_edge is None or edge.strength > best_edge.strength:
+                    best_edge = edge
+
+            if best_edge is None:
+                break
+
+            target = self._nodes.get(best_edge.target_id)
+            if target is None:
+                break
+
+            visited.add(best_edge.target_id)
+            relation_label = best_edge.edge_type.value.upper()
+            inferred_conf  = round(target.confidence * 0.70, 2)
+
+            parts.append(f"→ {relation_label} →")
+            parts.append(f"{_short_concept(target.concept)} (conf={inferred_conf:.2f})")
+
+            current_id = best_edge.target_id
+
+        chain = " ".join(parts)
+        logger.debug("Causal chain for %s: %s", node_id, chain)
+        return chain
+
+
+def _short_concept(concept: str, max_len: int = 40) -> str:
+    """Truncate a concept string for display purposes."""
+    return concept if len(concept) <= max_len else concept[:max_len - 1] + "…"

@@ -27,7 +27,10 @@ from trading_ai.brain.internet.economic_calendar import EconomicCalendar
 from trading_ai.brain.internet.web_researcher import WebResearcher
 from trading_ai.brain.internet.knowledge_researcher import KnowledgeResearcher
 from trading_ai.brain.memory.pattern_memory import CandlePatternMemory
+from trading_ai.brain.memory.sequence_memory import TemporalSequenceMemory
 from trading_ai.brain.reasoning.brain_reasoner import BrainReasoner, BrainSignal
+from trading_ai.brain.reasoning.rule_distiller import RuleDistillationEngine
+from trading_ai.brain.uncertainty import UncertaintyEstimator
 from trading_ai.brain.working_memory import WorkingMemory
 from trading_ai.brain.strategy_library import StrategyLibrary
 from trading_ai.brain.self_reflection import SelfReflectionEngine
@@ -103,11 +106,17 @@ class BrainCore:
         self.pattern_memory  = CandlePatternMemory(base_dir=self.base_dir)
         self._market_mode    = "OTC"   # "OTC" or "REAL"
 
+        # ── Phase 3 additions ────────────────────────────────────────────────
+        self.uncertainty_estimator = UncertaintyEstimator()
+        self.sequence_memory       = TemporalSequenceMemory(base_dir=self.base_dir)
+        self.rule_distiller        = RuleDistillationEngine(base_dir=self.base_dir)
+
         # ── State tracking ──────────────────────────────────────────────────
         self._last_strategy_name: str = "Unknown"
         self._last_confidence:    float = 0.5
         self._last_indicator_vec: Optional[np.ndarray] = None
         self._last_regime:        str = "unknown"
+        self._last_uncertainty:   dict = {}
 
         self._stop_event      = threading.Event()
         self._internet_thread = threading.Thread(
@@ -177,6 +186,18 @@ class BrainCore:
 
         self._last_strategy_name = strategy_name
 
+        # ── Uncertainty estimation ───────────────────────────────────────────
+        uncertainty = self.uncertainty_estimator.estimate(
+            indicator_vec=indicator_vec[:40] if len(indicator_vec) >= 40 else indicator_vec,
+            episodic_memory=self.episodic,
+        )
+        self._last_uncertainty = uncertainty
+
+        # ── Sequence memory lookup (trajectory-based hint) ───────────────────
+        seq_result = self.sequence_memory.lookup(
+            indicator_vec[:40] if len(indicator_vec) >= 40 else indicator_vec
+        )
+
         # ── Reasoner with strategy signal ───────────────────────────────────
         signal = self.reasoner.think(
             indicator_vec=indicator_vec,
@@ -188,6 +209,42 @@ class BrainCore:
             pattern_result=pattern_result,
             mtf_trend=mtf_trend,
         )
+
+        # ── Apply uncertainty to confidence ──────────────────────────────────
+        if self.uncertainty_estimator.should_skip_trade(
+            uncertainty["epistemic"], uncertainty["aleatoric"]
+        ) and signal.action != 0:
+            signal.action     = 0
+            signal.confidence = 0.7
+            signal.reasoning.append(
+                f"⚠️ Uncertainty too high — skipping trade "
+                f"(epistemic={uncertainty['epistemic']:.2f}, "
+                f"aleatoric={uncertainty['aleatoric']:.2f}, "
+                f"familiar={uncertainty['familiar_trades']} trades)"
+            )
+        else:
+            signal.confidence = round(
+                float(np.clip(signal.confidence * uncertainty["conf_multiplier"], 0.0, 0.95)),
+                3,
+            )
+            if uncertainty["epistemic"] > 0.55:
+                signal.reasoning.append(uncertainty["description"])
+
+        # ── Sequence memory boost ────────────────────────────────────────────
+        if seq_result is not None and signal.action != 0:
+            seq_wr, seq_conf, seq_n = seq_result
+            if seq_wr > 0.60:
+                signal.reasoning.append(
+                    f"Sequence: trajectory → BUY bias ({seq_wr:.0%} win rate, n={seq_n})"
+                )
+                if signal.action == 1:
+                    signal.confidence = min(0.95, signal.confidence + seq_conf * 0.05)
+            elif seq_wr < 0.40:
+                signal.reasoning.append(
+                    f"Sequence: trajectory → SELL bias ({1-seq_wr:.0%} win rate, n={seq_n})"
+                )
+                if signal.action == 2:
+                    signal.confidence = min(0.95, signal.confidence + seq_conf * 0.05)
 
         # ── Record this cycle's signal strength for recovery tracking ───────
         # (no-op on PRACTICE; on REAL it counts toward resume-readiness)
@@ -283,6 +340,20 @@ class BrainCore:
         except Exception as exc:
             logger.debug("Reflection error: %s", exc)
 
+        # ── Sequence memory + Rule distillation ─────────────────────────────
+        if len(indicator_vec) >= 20:
+            try:
+                self.sequence_memory.record(
+                    indicator_vec[:40] if len(indicator_vec) >= 40 else indicator_vec,
+                    pnl,
+                )
+            except Exception as exc:
+                logger.debug("SequenceMemory.record error: %s", exc)
+        try:
+            self.rule_distiller.record_trade(snapshot, action_taken, pnl > 0)
+        except Exception as exc:
+            logger.debug("RuleDistiller.record_trade error: %s", exc)
+
         # ── Strategy outcome ─────────────────────────────────────────────────
         self.strategy_lib.record_outcome(self._last_strategy_name, pnl > 0)
 
@@ -362,6 +433,10 @@ class BrainCore:
             "active_strategy":          self._last_strategy_name,
             "pattern_memory":           self.pattern_memory.stats(),
             "market_mode":              self._market_mode,
+            "uncertainty":              self._last_uncertainty,
+            "sequence_memory":          self.sequence_memory.stats(),
+            "distilled_rules":          self.rule_distiller.get_rules(),
+            "distilled_rules_text":     self.rule_distiller.format_rules(),
         }
 
     def shutdown(self):

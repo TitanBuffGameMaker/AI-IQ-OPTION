@@ -66,6 +66,315 @@ _pending_creds: Dict[str, str] = {}   # {"email":..,"password":..} from UI login
 _log_buffer: deque = deque(maxlen=300)   # last 300 log lines for new-client catch-up
 _log_broadcasting = False                # re-entrancy guard for the WS handler
 
+# ── Chat history ───────────────────────────────────────────────────────────────
+_chat_history: deque = deque(maxlen=100)
+
+
+class TradingAIChat:
+    """
+    AI chat interface — ตอบคำถามเกี่ยวกับระบบ AI trading ด้วยภาษาไทย
+    ใช้ข้อมูลจาก brain, trade_stats, capital_guard เพื่อตอบแบบ real-time
+    """
+
+    _GREETINGS = {"สวัสดี", "hello", "hi", "หวัดดี", "hey", "ดีจ้า", "ดีครับ", "ดีค่ะ"}
+    _HELP_KEYWORDS = {"ช่วย", "help", "คำสั่ง", "ถาม", "ทำอะไรได้", "capabilities"}
+
+    def respond(self, message: str) -> str:
+        msg = message.strip().lower()
+
+        # Greeting
+        if any(g in msg for g in self._GREETINGS):
+            return (
+                "สวัสดีครับ! 🤖 ผมคือ AI Trading Brain\n\n"
+                "ถามผมได้เลยเกี่ยวกับ:\n"
+                "• สถานะ — ดูว่า AI กำลังทำอะไร\n"
+                "• win rate — อัตราชนะ\n"
+                "• กลยุทธ์ — กลยุทธ์ที่ใช้อยู่\n"
+                "• กฎ — กฎที่ distill ออกมา\n"
+                "• ความไม่แน่นอน — ระดับ uncertainty\n"
+                "• balance / กำไร / ขาดทุน\n"
+                "• หยุด / CapitalGuard\n"
+                "• สรุป — สรุปสถานการณ์ทั้งหมด"
+            )
+
+        # Help
+        if any(k in msg for k in self._HELP_KEYWORDS):
+            return (
+                "สิ่งที่ถามผมได้ 💡\n\n"
+                "📊 ข้อมูล: สถานะ, win rate, balance, กำไร/ขาดทุน\n"
+                "🧠 สมอง: กลยุทธ์, กฎ, pattern, uncertainty, sequence\n"
+                "🛡️ ป้องกัน: CapitalGuard, limit, หยุด\n"
+                "📈 เทรด: สัญญาณล่าสุด, confidence, regime\n"
+                "📋 สรุป: ภาพรวมทั้งหมด"
+            )
+
+        # Trade stats & win rate
+        if any(k in msg for k in {"win rate", "winrate", "อัตราชนะ", "ชนะ", "เสีย", "trade", "เทรด"}):
+            return self._trade_summary()
+
+        # Balance / PnL
+        if any(k in msg for k in {"balance", "ยอด", "เงิน", "กำไร", "ขาดทุน", "pnl"}):
+            return self._balance_summary()
+
+        # Strategy / กลยุทธ์
+        if any(k in msg for k in {"กลยุทธ์", "strategy", "แผน", "วิธี"}):
+            return self._strategy_summary()
+
+        # Rules / กฎ
+        if any(k in msg for k in {"กฎ", "rule", "rules", "distil", "สกัด"}):
+            return self._rules_summary()
+
+        # Uncertainty
+        if any(k in msg for k in {"uncertainty", "ไม่แน่นอน", "epistemic", "aleatoric", "familiar"}):
+            return self._uncertainty_summary()
+
+        # Pattern / Sequence memory
+        if any(k in msg for k in {"pattern", "sequence", "จำ", "fingerprint", "trajectory"}):
+            return self._memory_summary()
+
+        # Signal / Confidence
+        if any(k in msg for k in {"signal", "สัญญาณ", "confidence", "มั่นใจ", "buy", "sell", "hold"}):
+            return self._signal_summary()
+
+        # Capital Guard / Stop
+        if any(k in msg for k in {"capitalguard", "capital", "guard", "หยุด", "limit", "stop", "protect", "ป้องกัน"}):
+            return self._capital_guard_summary()
+
+        # Brain status
+        if any(k in msg for k in {"brain", "สมอง", "node", "graph", "knowledge", "ความรู้"}):
+            return self._brain_summary()
+
+        # Status overall
+        if any(k in msg for k in {"สถานะ", "status", "ดูสิ", "เป็นยังไง", "ตอนนี้"}):
+            return self._full_status()
+
+        # Summary
+        if any(k in msg for k in {"สรุป", "summary", "overview", "ภาพรวม"}):
+            return self._full_status()
+
+        # Regime
+        if any(k in msg for k in {"regime", "ตลาด", "trending", "ranging", "volatile"}):
+            return self._regime_info()
+
+        # Why / ทำไม
+        if any(k in msg for k in {"ทำไม", "why", "เหตุผล", "reason"}):
+            return self._explain_last_decision()
+
+        return (
+            "ขออภัยครับ ผมยังไม่เข้าใจคำถามนี้ 🤔\n"
+            "ลองถามเกี่ยวกับ: สถานะ, win rate, กลยุทธ์, กฎ, สรุป\n"
+            "หรือพิมพ์ 'ช่วย' เพื่อดูรายการคำถามที่รองรับ"
+        )
+
+    # ── Response helpers ────────────────────────────────────────────────────────
+
+    def _trade_summary(self) -> str:
+        t = _trade_stats
+        trades = t.get("trades", 0)
+        wins   = t.get("wins", 0)
+        pnl    = t.get("pnl", 0.0)
+        wr     = wins / max(trades, 1)
+        emoji  = "🔥" if wr > 0.65 else ("✅" if wr > 0.50 else "⚠️")
+        return (
+            f"{emoji} สถิติการเทรด\n\n"
+            f"เทรดทั้งหมด: {trades} ไม้\n"
+            f"ชนะ: {wins} | แพ้: {trades - wins}\n"
+            f"Win Rate: {wr:.1%}\n"
+            f"P&L รวม: {'+'if pnl>=0 else ''}{pnl:.2f} USD"
+        )
+
+    def _balance_summary(self) -> str:
+        bal = _connector.get_balance() if _connector else 0.0
+        pnl = _trade_stats.get("pnl", 0.0)
+        cg  = _capital_guard
+        result = f"💰 ยอดเงินปัจจุบัน: ${bal:.2f}\nP&L รวม: {'+' if pnl >= 0 else ''}{pnl:.2f}"
+        if cg and cg.account_type == "REAL":
+            st = cg.status()
+            result += (
+                f"\n\n🛡️ CapitalGuard (REAL)\n"
+                f"P&L วันนี้: {'+' if st['session_pnl'] >= 0 else ''}{st['session_pnl']:.2f}\n"
+                f"ขาดทุนสะสม: {st['loss_pct']:.1%} (limit {st['daily_loss_limit']:.0%})\n"
+                f"กำไรสะสม: {st['profit_pct']:.1%} (target {st['profit_target']:.0%})"
+            )
+        return result
+
+    def _strategy_summary(self) -> str:
+        if not _brain:
+            return "⚠️ AI brain ยังไม่ได้โหลด"
+        st = _brain.get_status()
+        strat   = st.get("active_strategy", "Unknown")
+        stats   = st.get("strategy_stats", [])
+        lines   = [f"🎯 กลยุทธ์ที่ใช้อยู่: **{strat}**\n"]
+        for s in stats[:5]:
+            bar = "█" * int(s["win_rate"] * 10) + "░" * (10 - int(s["win_rate"] * 10))
+            lines.append(f"{s['name'][:20]}: {bar} {s['win_rate']:.0%} ({s.get('trades', '?')} ไม้)")
+        return "\n".join(lines)
+
+    def _rules_summary(self) -> str:
+        if not _brain:
+            return "⚠️ AI brain ยังไม่ได้โหลด"
+        text = _brain.rule_distiller.format_rules()
+        stats = _brain.rule_distiller.stats()
+        return (
+            f"📋 {text}\n\n"
+            f"📊 Log size: {stats['log_size']} trades, "
+            f"wins: {stats['wins_in_log']}"
+        )
+
+    def _uncertainty_summary(self) -> str:
+        if not _brain:
+            return "⚠️ AI brain ยังไม่ได้โหลด"
+        u = _brain._last_uncertainty
+        if not u:
+            return "ยังไม่มีข้อมูล uncertainty (AI ยังไม่ได้เทรด)"
+        skip = _brain.uncertainty_estimator.should_skip_trade(
+            u.get("epistemic", 0), u.get("aleatoric", 0)
+        )
+        return (
+            f"🔮 ความไม่แน่นอนล่าสุด\n\n"
+            f"Epistemic (ไม่รู้จักสภาวะ): {u.get('epistemic', 0):.2f}\n"
+            f"Aleatoric (สัญญาณวุ่นวาย): {u.get('aleatoric', 0):.2f}\n"
+            f"รวม: {u.get('total', 0):.2f}\n"
+            f"Conf multiplier: ×{u.get('conf_multiplier', 1):.2f}\n"
+            f"เคยเห็นสภาวะนี้: {u.get('familiar_trades', 0)} ครั้ง\n"
+            f"ควรข้ามการเทรด: {'⚠️ ใช่' if skip else '✅ ไม่'}\n\n"
+            f"📝 {u.get('description', '')}"
+        )
+
+    def _memory_summary(self) -> str:
+        if not _brain:
+            return "⚠️ AI brain ยังไม่ได้โหลด"
+        pat  = _brain.pattern_memory.stats()
+        seq  = _brain.sequence_memory.stats()
+        ep   = _brain.episodic.summary()
+        return (
+            f"🧩 ระบบความจำ\n\n"
+            f"Pattern Memory (OTC fingerprint):\n"
+            f"  Patterns: {pat.get('total_patterns', 0)} | "
+            f"Trusted: {pat.get('trusted_patterns', 0)}\n\n"
+            f"Sequence Memory (8-trade trajectory):\n"
+            f"  Sequences: {seq.get('total_sequences', 0)} | "
+            f"Trusted: {seq.get('trusted_sequences', 0)}\n"
+            f"  Window filled: {seq.get('window_fill', 0)}/8\n\n"
+            f"Episodic Memory:\n"
+            f"  ประสบการณ์: {ep.get('total', 0)} ครั้ง"
+        )
+
+    def _signal_summary(self) -> str:
+        if not _brain:
+            return "⚠️ AI brain ยังไม่ได้โหลด"
+        conf = _brain._last_confidence
+        regime = _brain._last_regime
+        u = _brain._last_uncertainty
+        conf_emoji = "🟢" if conf > 0.65 else ("🟡" if conf > 0.50 else "🔴")
+        result = (
+            f"📡 สัญญาณล่าสุด\n\n"
+            f"Confidence: {conf_emoji} {conf:.1%}\n"
+            f"Regime: {regime.upper()}\n"
+        )
+        if u:
+            result += f"Uncertainty: {u.get('total', 0):.2f} (×{u.get('conf_multiplier', 1):.2f})"
+        return result
+
+    def _capital_guard_summary(self) -> str:
+        cg = _capital_guard
+        if not cg:
+            return "⚠️ CapitalGuard ยังไม่ได้โหลด"
+        st = cg.status()
+        account = st.get("account_type", "PRACTICE")
+        if account == "PRACTICE":
+            return (
+                "🎓 ขณะนี้ใช้ **บัญชีทดลอง (PRACTICE)**\n\n"
+                "CapitalGuard ไม่ทำงานในบัญชีทดลอง\n"
+                "เพราะ PRACTICE = เรียนรู้ได้ไม่จำกัด ไม่มีการหยุด\n\n"
+                "สลับไปบัญชีจริง (REAL) เพื่อเปิดใช้การป้องกันทุน"
+            )
+        stopped = st.get("stopped", False)
+        stop_reason = st.get("stop_reason", "")
+        return (
+            f"🛡️ CapitalGuard — REAL Account\n\n"
+            f"P&L วันนี้: {'+' if st['session_pnl'] >= 0 else ''}{st['session_pnl']:.2f}\n"
+            f"ขาดทุน: {st['loss_pct']:.1%} / limit {st['daily_loss_limit']:.0%}\n"
+            f"กำไร: {st['profit_pct']:.1%} / target {st['profit_target']:.0%}\n"
+            f"Kelly bet: ${st['kelly_amount']:.2f}\n"
+            f"วันที่: {st['day_date']}\n\n"
+            + (f"⛔ หยุดแล้ว: {stop_reason}" if stopped else "✅ กำลังเทรดปกติ")
+        )
+
+    def _brain_summary(self) -> str:
+        if not _brain:
+            return "⚠️ AI brain ยังไม่ได้โหลด"
+        st = _brain.get_status()
+        return (
+            f"🧠 สมอง AI\n\n"
+            f"Knowledge nodes: {st.get('graph_nodes', 0)}\n"
+            f"Connections: {st.get('graph_branches', 0)}\n"
+            f"Avg confidence: {st.get('avg_confidence', 0):.2f}\n"
+            f"Episodic memories: {st.get('episodic_memories', 0)}\n\n"
+            f"Brain Age: {st.get('brain_age', 0)} ปี {st.get('brain_emoji', '')} {st.get('brain_stage', '')}\n"
+            f"Score: {st.get('brain_score', 0)}/100"
+        )
+
+    def _full_status(self) -> str:
+        running = _ai_running
+        trades  = _trade_stats.get("trades", 0)
+        wins    = _trade_stats.get("wins", 0)
+        pnl     = _trade_stats.get("pnl", 0.0)
+        wr      = wins / max(trades, 1)
+        bal     = _connector.get_balance() if _connector else 0.0
+        ai_status = "🟢 กำลังทำงาน" if running else "🔴 หยุดอยู่"
+        result = (
+            f"📊 สรุปสถานการณ์\n\n"
+            f"AI: {ai_status}\n"
+            f"Balance: ${bal:.2f}\n"
+            f"Win Rate: {wr:.1%} ({wins}/{trades})\n"
+            f"P&L รวม: {'+' if pnl >= 0 else ''}{pnl:.2f}\n"
+        )
+        if _brain:
+            st = _brain.get_status()
+            result += (
+                f"\n🧠 Brain: {st.get('brain_stage', '')} {st.get('brain_emoji', '')} "
+                f"({st.get('graph_nodes', 0)} nodes)\n"
+                f"กลยุทธ์: {st.get('active_strategy', 'Unknown')}"
+            )
+        if _capital_guard and _capital_guard.account_type == "REAL":
+            cg = _capital_guard.status()
+            result += f"\n🛡️ CapitalGuard P&L: {cg['session_pnl']:+.2f}"
+        return result
+
+    def _regime_info(self) -> str:
+        if not _brain:
+            return "⚠️ AI brain ยังไม่ได้โหลด"
+        regime = _brain._last_regime
+        desc = {
+            "trending": "📈 Trending — ตลาดมีทิศทางชัดเจน ADX สูง เหมาะกับ trend following",
+            "ranging":  "↔️ Ranging — ตลาดไซด์เวย์ เหมาะกับ mean reversion",
+            "volatile": "⚡ Volatile — ตลาดผันผวนสูง ระมัดระวัง confidence ลดลง",
+            "unknown":  "❓ ยังไม่ทราบ regime (AI ยังไม่ได้วิเคราะห์)",
+        }.get(regime, f"Regime: {regime}")
+        return desc
+
+    def _explain_last_decision(self) -> str:
+        if not _brain:
+            return "⚠️ AI brain ยังไม่ได้โหลด"
+        conf = _brain._last_confidence
+        u = _brain._last_uncertainty
+        regime = _brain._last_regime
+        strat  = _brain._last_strategy_name
+        result = (
+            f"🤔 เหตุผลการตัดสินใจล่าสุด\n\n"
+            f"กลยุทธ์: {strat}\n"
+            f"Regime: {regime.upper()}\n"
+            f"Confidence: {conf:.1%}\n"
+        )
+        if u:
+            result += (
+                f"\nUncertainty:\n"
+                f"  {u.get('description', 'N/A')}\n"
+                f"  Conf multiplier ×{u.get('conf_multiplier', 1):.2f}"
+            )
+        return result
+
 
 class _WsBroadcastHandler(logging.Handler):
     """Forwards log records to every connected WebSocket client in real-time."""
@@ -290,6 +599,12 @@ async def _send_current_state(ws: WebSocket):
         })
     if _capital_guard:
         await manager.send(ws, {"type": "capital_guard", **_capital_guard.status()})
+    # Send chat history so newly-connected clients see the conversation
+    if _chat_history:
+        await manager.send(ws, {
+            "type":    "chat_history",
+            "entries": list(_chat_history),
+        })
     # Replay buffered log lines so the Logs panel is populated immediately
     if _log_buffer:
         await manager.send(ws, {
@@ -333,6 +648,17 @@ async def _handle_client_message(ws: WebSocket, msg: Dict):
             "password": str(msg.get("password", "")).strip(),
         }
         _otp_event.set()   # wake the waiting _init_components thread
+
+    elif mtype == "chat_user":
+        user_msg = str(msg.get("message", "")).strip()
+        if user_msg:
+            ts = time.strftime("%H:%M")
+            user_entry = {"role": "user", "message": user_msg, "time": ts}
+            _chat_history.append(user_entry)
+            ai_reply = TradingAIChat().respond(user_msg)
+            ai_entry = {"role": "ai", "message": ai_reply, "time": ts}
+            _chat_history.append(ai_entry)
+            await manager.send(ws, {"type": "chat_ai", **ai_entry})
 
     elif mtype == "ping":
         await manager.send(ws, {"type": "pong"})
