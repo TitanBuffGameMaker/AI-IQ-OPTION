@@ -333,7 +333,8 @@ class BrainCore:
             for i, name in enumerate(INDICATOR_NAMES)
         }
 
-        # ── FastLearner online update ────────────────────────────────────────
+        # ── FastLearner online update (reward scaled by Dopamine RPE) ──────────
+        rpe_mult = self.dopamine.update(pnl)   # surprise → amplify learning
         if next_obs is not None and self._last_indicator_vec is not None:
             try:
                 obs_arr = self._last_indicator_vec.astype(np.float32)
@@ -342,12 +343,12 @@ class BrainCore:
                     self.fast_learner.update_online(
                         obs=obs_arr,
                         action=action_taken,
-                        reward=float(pnl),
+                        reward=float(pnl) * rpe_mult,   # dopamine-scaled reward
                         next_obs=nxt_arr,
                         done=False,
                     )
             except Exception as exc:
-                logger.debug("FastLearner update error: %s", exc)
+                logger.warning("FastLearner update error: %s", exc)  # was DEBUG
 
         # ── Working memory update ────────────────────────────────────────────
         self.working_memory.update(
@@ -412,9 +413,6 @@ class BrainCore:
                 )
 
         # ── Neuroscience modules ─────────────────────────────────────────────
-        # Dopamine: compute RPE to amplify/dampen learning signal
-        _rpe_mult = self.dopamine.update(pnl)
-
         # CLS hippocampus: encode this episode fast
         self.cls_memory.encode(
             indicators=indicator_vec[:40] if len(indicator_vec) >= 40 else indicator_vec,

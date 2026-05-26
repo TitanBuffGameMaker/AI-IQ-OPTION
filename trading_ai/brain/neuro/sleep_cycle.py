@@ -28,6 +28,8 @@ import threading
 import time
 from typing import Callable, Optional
 
+_consolidation_lock = threading.Lock()
+
 logger = logging.getLogger(__name__)
 
 
@@ -80,8 +82,9 @@ class SleepCycle:
                 pass
 
         try:
-            # CLS consolidation: replay surprising episodes → neocortex
-            n_updated = brain.cls_memory.consolidate(n_replays=30)
+            # CLS consolidation: replay surprising episodes → neocortex (locked)
+            with _consolidation_lock:
+                n_updated = brain.cls_memory.consolidate(n_replays=30)
             logger.info("💤 CLS: %d neocortical patterns updated", n_updated)
 
             # Rule distillation: extract new rules from recent trades

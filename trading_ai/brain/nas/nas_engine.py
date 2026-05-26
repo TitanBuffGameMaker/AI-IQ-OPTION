@@ -153,12 +153,12 @@ class NASEngine:
             if ch.agent is None:
                 continue
             try:
-                pred = ch.agent.predict(obs)
-                pred_action = int(pred["action"])
-                if pred_action == actual_action:
+                # get_confidence() returns (action, prob) — correct PPOAgent method
+                pred_action, _prob = ch.agent.get_confidence(obs.astype(np.float32))
+                if int(pred_action) == actual_action:
                     ch.correct += 1
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("NAS challenger predict error: %s", e)
             ch.trades += 1
 
             if ch.trades >= EVAL_PERIOD:
