@@ -1,13 +1,19 @@
 """
-Trading Environment — ULTRA EDITION
+Trading Environment — Binary Options Edition
 
-สิ่งที่ปรับปรุง:
-  - OBS_SIZE = 40 indicators + 256 chart features = 296
-  - Sharpe Ratio reward shaping
-  - Risk-adjusted reward function
-  - Better observation normalization
-  - Anti-overtrading penalty
-  - Drawdown penalty
+Binary Options rules (IQ Option):
+  WIN  (+CALL or +PUT correct direction): +payout% of stake (fixed, e.g. 80-89%)
+  LOSS (wrong direction):                 -100% of stake (all gone)
+  HOLD (skip this candle):                ±0  (capital preserved — this is free)
+
+Reward scale per step:
+  Win  → base_reward ≈ +0.80 to +0.89
+  Loss → base_reward = -1.00
+  Hold → 0.00  (waiting costs nothing — do NOT penalise)
+
+Break-even win rate: WR > 1/(1 + payout)
+  80% payout → need > 55.6% win rate
+  89% payout → need > 53.0% win rate
 """
 import logging
 import time
@@ -41,7 +47,11 @@ class TradingEnv(gym.Env):
 
     metadata = {"render_modes": []}
     ACTIONS  = {0: "hold", 1: "call", 2: "put"}
-    HOLD_PENALTY = -0.02
+    # Binary Options: waiting costs nothing — capital is preserved when you don't trade.
+    # Penalising HOLD teaches the AI to "always trade" which destroys the account.
+    # Set to 0.0 so the AI learns: only trade when expected value is positive.
+    HOLD_PENALTY = 0.0
+    FAIL_PENALTY = -0.05   # trade placement failure (API error, market closed)
 
     def __init__(self, connector: IQOptionConnector):
         super().__init__()
@@ -110,17 +120,20 @@ class TradingEnv(gym.Env):
         terminated  = False
 
         if action == 0:
-            reward = self.HOLD_PENALTY
+            # HOLD: waiting is neutral in binary options (capital preserved)
+            reward = self.HOLD_PENALTY   # = 0.0
             info["skipped"] = True
         else:
             if not self.connector.is_market_open(self._current_asset):
-                reward = self.HOLD_PENALTY
+                # Tried to trade but market closed → treat as forced HOLD
+                reward = self.HOLD_PENALTY   # = 0.0, not a mistake
                 info["skipped"] = True
             else:
-                # Anti-overtrading: ถ้าเทรดบ่อยเกินไปใน 10 steps → penalty
+                # Anti-overtrading: penalise if trading every single candle
+                # (binary options needs patience, not spray-and-pray)
                 trade_rate = sum(self._recent_trades) / max(len(self._recent_trades), 1)
                 if trade_rate > 0.8:
-                    reward = -0.05
+                    reward = self.FAIL_PENALTY
                     info["skipped"] = True
                     logger.debug("Anti-overtrading: trade rate too high (%.1f%%)", trade_rate * 100)
                 else:
@@ -166,7 +179,7 @@ class TradingEnv(gym.Env):
             duration_minutes=config.TRADE_DURATION,
         )
         if not success or order_id is None:
-            return self.HOLD_PENALTY, {"action": direction, "pnl": 0.0, "skipped": True}
+            return self.FAIL_PENALTY, {"action": direction, "pnl": 0.0, "skipped": True}
 
         # Notify any external listener (server.py adds to its open-orders book
         # so the dashboard can show a live countdown).
@@ -202,29 +215,33 @@ class TradingEnv(gym.Env):
         else:
             self._consecutive_losses = 0
 
-        # ULTRA Reward Shaping:
-        # 1. Base reward: normalized PnL
+        # Binary Options Reward:
+        # base = pnl / stake → +0.80~0.89 (win) or -1.00 (loss)
+        # This exact asymmetry teaches the AI: need >55% win rate to profit
         base_reward = pnl / (config.TRADE_AMOUNT + 1e-9)
 
-        # 2. Sharpe bonus: เพิ่มรางวัลถ้า reward สม่ำเสมอ
+        # Win-rate consistency bonus: reward sustained winning streaks
+        # (replaces Sharpe which is designed for continuous returns, not binary)
         self._reward_history.append(base_reward)
-        sharpe_bonus = 0.0
+        win_bonus = 0.0
         if len(self._reward_history) >= 5:
-            r_arr  = np.array(self._reward_history)
-            sharpe = float(r_arr.mean()) / (float(r_arr.std()) + 1e-9)
-            sharpe_bonus = np.clip(sharpe * 0.1, -0.2, 0.2)
+            r_arr    = np.array(self._reward_history)
+            win_rate = float((r_arr > 0).mean())
+            # Bonus only above break-even (~55%); penalise below
+            win_bonus = np.clip((win_rate - 0.556) * 0.5, -0.10, 0.10)
 
-        # 3. Consistency bonus
-        if pnl > 0 and self._consecutive_losses == 0 and self._trade_count_episode > 3:
-            consistency = 0.05
+        # Streak bonus: reward consistency (3+ consecutive wins)
+        if pnl > 0 and self._consecutive_losses == 0 and self._trade_count_episode >= 3:
+            streak_bonus = 0.05
         else:
-            consistency = 0.0
+            streak_bonus = 0.0
 
-        reward = base_reward + sharpe_bonus + consistency
+        reward = base_reward + win_bonus + streak_bonus
 
+        outcome = "WIN" if pnl > 0 else "LOSS"
         logger.info(
-            "Trade %s: PnL=%.2f base=%.3f sharpe_bonus=%.3f total_reward=%.3f",
-            direction, pnl, base_reward, sharpe_bonus, reward,
+            "Binary %s %s: PnL=%.2f reward=%.3f (base=%.3f win_bonus=%.3f streak=%.2f)",
+            outcome, direction, pnl, reward, base_reward, win_bonus, streak_bonus,
         )
         return reward, {"action": direction, "pnl": pnl, "skipped": False}
 
