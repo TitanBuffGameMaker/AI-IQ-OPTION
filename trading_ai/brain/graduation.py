@@ -124,13 +124,30 @@ class GraduationSystem:
 
     def evaluate(self, brain) -> Dict[str, Any]:
         """Full evaluation against all graduation criteria."""
-        st = brain.get_status()
-        trades    = st.get("episodic_memories", 0)
-        wr        = brain.short_term.win_rate()
-        rules     = brain.rule_distiller.get_rules()
-        stage     = st.get("brain_stage", "ทารก")
+        from trading_ai.brain.brain_age import calculate_brain_age
+
+        mem_summary  = brain.episodic.summary()
+        graph_stats  = brain.graph.stats()
+        trades       = mem_summary.get("total", 0)
+        wr           = brain.short_term.win_rate()
+        rules        = brain.rule_distiller.get_rules()
+        ep           = trades
+
+        try:
+            age_result = calculate_brain_age(
+                nodes             = graph_stats["total_nodes"],
+                win_rate          = wr,
+                total_trades      = trades,
+                avg_confidence    = graph_stats["avg_confidence"],
+                ppo_updates       = 0,
+                episodic_memories = trades,
+                graph_branches    = graph_stats["total_edges"],
+            )
+            stage = age_result.stage
+        except Exception:
+            stage = "ทารก"
+
         stage_idx = _STAGE_INDEX.get(stage, 0)
-        ep        = brain.episodic.summary().get("total", 0)
         try:
             neo = brain.cls_memory.stats()["neocortex_patterns"]
         except Exception:
