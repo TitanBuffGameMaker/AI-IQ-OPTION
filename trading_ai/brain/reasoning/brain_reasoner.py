@@ -116,6 +116,7 @@ class BrainReasoner:
         # ประวัติ signals สำหรับ smoothing
         self._signal_history:  deque = deque(maxlen=5)
         self._pnl_history:     deque = deque(maxlen=20)
+        self._market_mode = "OTC"   # set via set_market_mode()
 
     # ── Main: think ────────────────────────────────────────────────────────────
 
@@ -127,6 +128,7 @@ class BrainReasoner:
         ppo_confidence: float,
         strategy_signal: Optional[Tuple[int, float]] = None,
         strategy_name: str = "",
+        pattern_result=None,
     ) -> BrainSignal:
         """7-layer signal fusion + optional strategy signal boost"""
         reasoning: List[str] = []
@@ -166,6 +168,23 @@ class BrainReasoner:
         if perf_reason:
             reasoning.append(perf_reason)
 
+        # ── Layer 7: Pattern Memory (OTC-specific) ──────────────────────────
+        pattern_buy = pattern_sell = pattern_hold = 0.0
+        pattern_reason = ""
+        if pattern_result is not None:
+            pat_wr, pat_conf, pat_n = pattern_result
+            if pat_wr > 0.58:        # pattern historically resolves UP
+                pattern_buy  = pat_conf * 2.0
+                pattern_reason = f"Pattern memory: {pat_wr:.0%} BUY ({pat_n} samples)"
+            elif pat_wr < 0.42:      # pattern historically resolves DOWN
+                pattern_sell = pat_conf * 2.0
+                pattern_reason = f"Pattern memory: {1-pat_wr:.0%} SELL ({pat_n} samples)"
+            else:
+                pattern_hold = pat_conf * 0.5
+                pattern_reason = f"Pattern: mixed ({pat_wr:.0%} win rate, {pat_n} samples)"
+            if pattern_reason:
+                reasoning.append(pattern_reason)
+
         # ── Regime-adaptive weights ─────────────────────────────────────────
         # ตลาด trending: เน้น PPO + momentum
         # ตลาด ranging: เน้น oscillators (RSI, Stoch)
@@ -189,10 +208,12 @@ class BrainReasoner:
 
         # ── Aggregate scores ────────────────────────────────────────────────
         buy_score  = (kg_buy * kg_weight + ep_buy + cs_buy * cs_weight +
-                      news_buy + perf_boost * (1 if ppo_action == 1 else 0))
+                      news_buy + pattern_buy +
+                      perf_boost * (1 if ppo_action == 1 else 0))
         sell_score = (kg_sell * kg_weight + ep_sell + cs_sell * cs_weight +
-                      news_sell + perf_boost * (1 if ppo_action == 2 else 0))
-        hold_score = kg_hold + news_hold + hold_penalty
+                      news_sell + pattern_sell +
+                      perf_boost * (1 if ppo_action == 2 else 0))
+        hold_score = kg_hold + news_hold + hold_penalty + pattern_hold
 
         # PPO agent vote (ใหญ่ที่สุด)
         if ppo_action == 0:
@@ -349,6 +370,9 @@ class BrainReasoner:
 
     # ── Internet knowledge ─────────────────────────────────────────────────────
 
+    def set_market_mode(self, mode: str) -> None:
+        self._market_mode = mode.upper()
+
     def absorb_internet_knowledge(self, nodes: List[KnowledgeNode]):
         for node in nodes:
             self.graph.add_node(node)
@@ -496,6 +520,8 @@ class BrainReasoner:
         return buy_score, sell_score, reason
 
     def _news_signals(self) -> Tuple[float, float, float, str]:
+        if self._market_mode == "OTC":
+            return 0.0, 0.0, 0.0, ""   # irrelevant for OTC synthetic prices
         buy = sell = hold = 0.0
         reason = ""
         try:
@@ -516,6 +542,8 @@ class BrainReasoner:
         return buy, sell, hold, reason
 
     def _calendar_risk(self) -> Tuple[float, str]:
+        if self._market_mode == "OTC":
+            return 1.0, ""   # no economic events affect OTC prices
         risk_mult = 1.0
         reason    = ""
         try:

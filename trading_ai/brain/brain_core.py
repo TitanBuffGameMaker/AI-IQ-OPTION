@@ -26,6 +26,7 @@ from trading_ai.brain.internet.news_fetcher import NewsFetcher
 from trading_ai.brain.internet.economic_calendar import EconomicCalendar
 from trading_ai.brain.internet.web_researcher import WebResearcher
 from trading_ai.brain.internet.knowledge_researcher import KnowledgeResearcher
+from trading_ai.brain.memory.pattern_memory import CandlePatternMemory
 from trading_ai.brain.reasoning.brain_reasoner import BrainReasoner, BrainSignal
 from trading_ai.brain.working_memory import WorkingMemory
 from trading_ai.brain.strategy_library import StrategyLibrary
@@ -99,6 +100,8 @@ class BrainCore:
         self.strategy_lib   = StrategyLibrary(base_dir=self.base_dir)
         self.reflection     = SelfReflectionEngine(base_dir=self.base_dir)
         self.fast_learner   = FastLearner(obs_size=OBS_SIZE)
+        self.pattern_memory  = CandlePatternMemory(base_dir=self.base_dir)
+        self._market_mode    = "OTC"   # "OTC" or "REAL"
 
         # ── State tracking ──────────────────────────────────────────────────
         self._last_strategy_name: str = "Unknown"
@@ -125,6 +128,15 @@ class BrainCore:
         self.account_type = new
         self.working_memory.set_account_type(new)
 
+    def set_market_mode(self, mode: str) -> None:
+        """Switch between 'OTC' and 'REAL' market mode.
+        OTC: skip news/calendar, rely on patterns + indicators.
+        REAL: full news/calendar/sentiment active.
+        """
+        self._market_mode = mode.upper()
+        self.reasoner.set_market_mode(self._market_mode)
+        logger.info("Market mode → %s", self._market_mode)
+
     # ── Main interface ─────────────────────────────────────────────────────────
 
     def think(
@@ -132,12 +144,18 @@ class BrainCore:
         indicator_vec: np.ndarray,
         ppo_action: int,
         ppo_confidence: float,
+        candles=None,
     ) -> BrainSignal:
         # ── Build snapshot ──────────────────────────────────────────────────
         snapshot = {
             name: float(indicator_vec[i]) if i < len(indicator_vec) else 0.0
             for i, name in enumerate(INDICATOR_NAMES)
         }
+
+        # Pattern memory lookup (OTC: main signal; REAL: supplementary)
+        pattern_result = None
+        if candles is not None:
+            pattern_result = self.pattern_memory.lookup(candles)
 
         # ── Working memory context ──────────────────────────────────────────
         wm_pattern = self.working_memory.get_recent_pattern()
@@ -164,6 +182,7 @@ class BrainCore:
             ppo_confidence=ppo_confidence,
             strategy_signal=strategy_signal,
             strategy_name=strategy_name,
+            pattern_result=pattern_result,
         )
 
         # ── Record this cycle's signal strength for recovery tracking ───────
@@ -207,7 +226,15 @@ class BrainCore:
         indicator_vec: np.ndarray,
         ppo_action: int,
         next_obs: Optional[np.ndarray] = None,
+        candles=None,
     ):
+        # Record candle pattern outcome for OTC pattern memory
+        if candles is not None:
+            try:
+                self.pattern_memory.record(candles, pnl)
+            except Exception:
+                pass
+
         self.short_term.update_last_reward(pnl)
 
         snapshot = {
@@ -329,6 +356,8 @@ class BrainCore:
             "pause_status":             pause_status,
             "account_type":             self.account_type,
             "active_strategy":          self._last_strategy_name,
+            "pattern_memory":           self.pattern_memory.stats(),
+            "market_mode":              self._market_mode,
         }
 
     def shutdown(self):
@@ -347,35 +376,38 @@ class BrainCore:
         while not self._stop_event.is_set():
             now = time.time()
 
-            if (now - last_news) >= self.INTERNET_REFRESH_INTERVAL:
-                try:
-                    self.reasoner.absorb_news_as_nodes()
-                    last_news = now
-                    logger.info("Brain absorbed latest news")
-                except Exception as exc:
-                    logger.debug("News error: %s", exc)
+            # In OTC mode, news and asset-specific research are irrelevant —
+            # skip them to avoid noise and save bandwidth.
+            if self._market_mode != "OTC":
+                if (now - last_news) >= self.INTERNET_REFRESH_INTERVAL:
+                    try:
+                        self.reasoner.absorb_news_as_nodes()
+                        last_news = now
+                        logger.info("Brain absorbed latest news")
+                    except Exception as exc:
+                        logger.debug("News error: %s", exc)
 
-            if (now - last_res) >= self.RESEARCH_INTERVAL:
-                try:
-                    new_nodes = self.researcher.research()
-                    if new_nodes:
-                        self.reasoner.absorb_internet_knowledge(new_nodes)
-                    last_res = now
-                except Exception as exc:
-                    logger.debug("Research error: %s", exc)
+                if (now - last_res) >= self.RESEARCH_INTERVAL:
+                    try:
+                        new_nodes = self.researcher.research()
+                        if new_nodes:
+                            self.reasoner.absorb_internet_knowledge(new_nodes)
+                        last_res = now
+                    except Exception as exc:
+                        logger.debug("Research error: %s", exc)
+            else:
+                # Keep last_news/last_res updated to avoid burst when switching modes
+                last_news = now
+                last_res  = now
 
-            # Knowledge research: techniques, strategies, concepts (not news).
-            # Offset by 600s from the asset-news researcher so the two don't run
-            # back-to-back and saturate the brain with absorption work.
+            # Knowledge research (techniques/strategies) runs in both modes
             if (now - last_knowledge) >= self.KNOWLEDGE_INTERVAL:
                 try:
                     new_nodes = self.knowledge_researcher.research()
                     if new_nodes:
                         self.reasoner.absorb_internet_knowledge(new_nodes)
-                        logger.info(
-                            "Brain learned %d new trading concepts from internet",
-                            len(new_nodes),
-                        )
+                        logger.info("Brain learned %d new trading concepts from internet",
+                                    len(new_nodes))
                     last_knowledge = now
                 except Exception as exc:
                     logger.debug("KnowledgeResearcher error: %s", exc)

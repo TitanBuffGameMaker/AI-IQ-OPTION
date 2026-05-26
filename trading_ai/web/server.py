@@ -268,6 +268,7 @@ async def _send_current_state(ws: WebSocket):
         "all_passed": all_passed_cached,
         "history": list(_trade_history)[-20:],
         "open_orders": list(_open_orders.values()),
+        "market_mode": (_brain._market_mode if _brain else "OTC"),
         "settings": {
             "timeframe": f"{config.CANDLE_TIMEFRAME // 60}m",
             "duration": f"{config.TRADE_DURATION}m",
@@ -503,6 +504,16 @@ def _apply_settings(msg: Dict):
                             else " — โหมดจริง (จะหยุดเพื่อรักษายอดเมื่อแพ้)"),
                 "level": "info",
             })
+    if "market_mode" in msg:
+        mode = str(msg["market_mode"]).upper()
+        if mode in ("OTC", "REAL"):
+            if _brain:
+                _brain.set_market_mode(mode)
+            mode_desc = ("🎲 OTC — pattern learning, news/calendar disabled"
+                         if mode == "OTC"
+                         else "📈 Real — news, calendar, sentiment active")
+            broadcast_sync({"type": "status", "message": mode_desc, "level": "info"})
+            broadcast_sync({"type": "market_mode", "mode": mode})
 
 
 # ── AI trading loop (runs in background thread) ───────────────────────────────
@@ -554,7 +565,9 @@ def _ai_loop():
             indicator_vec = asset_obs[:N_INDICATORS]
             ppo_action, log_prob, value = _agent.select_action(asset_obs)
             _, ppo_conf = _agent.get_confidence(asset_obs)
-            signal = _brain.think(indicator_vec, ppo_action, ppo_conf)
+            # Pass raw candles so brain can do pattern-memory lookup
+            signal = _brain.think(indicator_vec, ppo_action, ppo_conf,
+                                  candles=getattr(_env, "_last_candles", None))
 
             # Adjust final action through brain's risk multiplier + confidence gate
             final_action = ppo_action
@@ -626,7 +639,8 @@ def _ai_loop():
             pnl = info.get("pnl", 0.0)
             logger.info("Trade %s on %s completed: pnl=%+.2f total_trades=%d",
                         action_name, display_name, pnl, _trade_stats["trades"] + 1)
-            _brain.learn(pnl, final_action, indicator_vec, ppo_action, next_obs=next_obs)
+            _brain.learn(pnl, final_action, indicator_vec, ppo_action, next_obs=next_obs,
+                         candles=getattr(_env, "_last_candles", None))
 
             _trade_stats["trades"] += 1
             if pnl > 0:

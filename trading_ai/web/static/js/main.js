@@ -124,6 +124,10 @@ function handleMessage(msg) {
       applyStrategy(msg);
       break;
 
+    case 'market_mode':
+      if (msg.mode) _applyMarketModeUI(msg.mode);
+      break;
+
     case 'log':
       addLogEntry(msg);
       break;
@@ -272,6 +276,7 @@ function applyInit(msg) {
   (msg.open_orders || []).forEach(addActiveOrder);
   applySettings(msg.settings || {});
   setAiState(msg.ai_running || false);
+  _applyMarketModeUI(msg.market_mode || 'OTC');
 }
 
 function applyConnection(msg) {
@@ -663,6 +668,35 @@ function saveSettings() {
   send({ type: 'settings', timeframe: tf, duration: dur, amount: parseFloat(amt) });
   updateSettingsBadge(tf, dur);
   showToast('Settings saved', 'success');
+}
+
+// ── Market Mode toggle ────────────────────────────────────────────────────────
+function setMarketMode(mode) {
+  send({ type: 'settings', market_mode: mode });
+  _applyMarketModeUI(mode);
+}
+
+function _applyMarketModeUI(mode) {
+  const otcBtn  = document.getElementById('btn-mode-otc');
+  const realBtn = document.getElementById('btn-mode-real');
+  const desc    = document.getElementById('mode-desc');
+  const badge   = document.getElementById('market-mode-badge');
+  const icon    = document.getElementById('market-mode-icon');
+  const text    = document.getElementById('market-mode-text');
+
+  if (!otcBtn) return;
+
+  if (mode === 'OTC') {
+    otcBtn.className  = 'mode-btn active otc';
+    realBtn.className = 'mode-btn';
+    desc.textContent  = '🎲 OTC — pattern learning, news/calendar disabled (OTC ไม่เกี่ยวกับข่าว)';
+    if (badge) { badge.className = 'nav-badge otc'; icon.textContent = '🎲'; text.textContent = 'OTC'; }
+  } else {
+    otcBtn.className  = 'mode-btn';
+    realBtn.className = 'mode-btn active real';
+    desc.textContent  = '📈 Real Market — news, calendar, sentiment active (ดูแนวโน้มตลาดจริง)';
+    if (badge) { badge.className = 'nav-badge real'; icon.textContent = '📈'; text.textContent = 'Real'; }
+  }
 }
 
 // ── AI toggle ─────────────────────────────────────────────────────────────────

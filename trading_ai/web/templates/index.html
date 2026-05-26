@@ -44,6 +44,13 @@
     <span id="nav-age-stage" style="font-size:10px;color:#9e8aff;">ทารก</span>
   </div>
 
+  <!-- Market Mode badge -->
+  <div class="nav-badge" id="market-mode-badge" onclick="switchTab('settings')"
+       style="cursor:pointer;" title="คลิกเพื่อเปลี่ยน mode">
+    <span id="market-mode-icon">🎲</span>
+    <span id="market-mode-text">OTC</span>
+  </div>
+
   <div class="spacer"></div>
 
   <!-- Settings display -->
@@ -389,6 +396,22 @@
 
       <!-- Settings panel -->
       <div id="tab-settings" class="tab-panel">
+
+        <!-- ── Market Mode Toggle ── -->
+        <div class="mode-section">
+          <div class="mode-section-title">🌐 Market Mode</div>
+          <div class="mode-toggle-group">
+            <button id="btn-mode-otc"  class="mode-btn active" onclick="setMarketMode('OTC')">
+              🎲 OTC (Synthetic)
+            </button>
+            <button id="btn-mode-real" class="mode-btn"        onclick="setMarketMode('REAL')">
+              📈 Real Market
+            </button>
+          </div>
+          <div class="mode-desc" id="mode-desc">
+            Pattern learning — news &amp; calendar disabled (OTC ไม่เกี่ยวกับข่าว)
+          </div>
+        </div>
 
         <div class="form-group">
           <label class="form-label">กรอบเวลาแท่งเทียน (Timeframe)</label>

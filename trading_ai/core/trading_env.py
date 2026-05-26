@@ -15,6 +15,7 @@ from collections import deque
 from typing import Optional, Tuple
 
 import numpy as np
+import pandas as pd
 import gymnasium as gym
 from gymnasium import spaces
 
@@ -70,6 +71,7 @@ class TradingEnv(gym.Env):
         self._daily_pnl:          float = 0.0
         self._episode_pnl:        float = 0.0
         self._last_obs:           Optional[np.ndarray] = None
+        self._last_candles:       Optional[pd.DataFrame] = None
 
         # สำหรับ Sharpe reward
         self._reward_history: deque = deque(maxlen=config.SHARPE_WINDOW)
@@ -231,6 +233,7 @@ class TradingEnv(gym.Env):
             timeframe_seconds=config.CANDLE_TIMEFRAME,
             count=config.LOOKBACK_CANDLES + 10,
         )
+        self._last_candles = df
         if df is not None and len(df) >= 60:
             ind_vec = self.indicator_engine.compute(df)
         else:
