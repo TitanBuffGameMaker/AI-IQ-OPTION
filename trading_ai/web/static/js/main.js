@@ -812,14 +812,35 @@ function switchTab(name) {
   document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
   document.querySelector(`[data-tab="${name}"]`).classList.add('active');
   document.getElementById(`tab-${name}`).classList.add('active');
-  // Chat: scroll to bottom on open
-  if (name === 'chat') {
-    scrollChatToBottom();
-    setTimeout(() => document.getElementById('chat-input')?.focus(), 100);
-  }
 }
 
-// ── Chat ──────────────────────────────────────────────────────────────────────
+// ── Floating Chat Widget ──────────────────────────────────────────────────────
+let _chatOpen    = false;
+let _chatUnread  = 0;
+
+function toggleChat() {
+  const panel = document.getElementById('chat-panel');
+  const btn   = document.getElementById('chat-float-btn');
+  if (!panel) return;
+
+  _chatOpen = !_chatOpen;
+  panel.style.display = _chatOpen ? 'flex' : 'none';
+  btn.textContent = _chatOpen ? '✕' : '💬';
+
+  if (_chatOpen) {
+    // Clear unread badge
+    _chatUnread = 0;
+    const notif = document.getElementById('chat-notif');
+    if (notif) notif.style.display = 'none';
+    scrollChatToBottom();
+    setTimeout(() => document.getElementById('chat-input')?.focus(), 80);
+    // Add back emoji to button when closing
+    btn.style.fontSize = _chatOpen ? '16px' : '22px';
+  } else {
+    btn.textContent = '💬';
+    btn.style.fontSize = '22px';
+  }
+}
 
 function sendChatMessage() {
   const input = document.getElementById('chat-input');
@@ -827,7 +848,7 @@ function sendChatMessage() {
   const text = input.value.trim();
   if (!text) return;
   input.value = '';
-  appendChatBubble('user', text, _chatTime());
+  appendChatBubble('user', text, _chatNow());
   send({ type: 'chat_user', message: text });
 }
 
@@ -838,40 +859,63 @@ function appendChatBubble(role, message, time, batch) {
   const wrap = document.createElement('div');
   wrap.className = `chat-bubble ${role}`;
 
-  const text = document.createElement('div');
-  text.className = 'chat-text';
-  // Convert newlines and **bold** to HTML
-  text.innerHTML = _chatMarkdown(message);
+  const textEl = document.createElement('div');
+  textEl.className = 'chat-text';
+  textEl.innerHTML = _chatMarkdown(message);
 
-  const ts = document.createElement('div');
-  ts.className = 'chat-time';
-  ts.textContent = time || _chatTime();
+  const tsEl = document.createElement('div');
+  tsEl.className = 'chat-time';
+  tsEl.textContent = time || _chatNow();
 
-  wrap.appendChild(text);
-  wrap.appendChild(ts);
+  wrap.appendChild(textEl);
+  wrap.appendChild(tsEl);
   container.appendChild(wrap);
 
-  if (!batch) scrollChatToBottom();
+  if (!batch) {
+    scrollChatToBottom();
+    // Increment unread badge when chat is closed
+    if (!_chatOpen && role === 'ai') {
+      _chatUnread++;
+      const notif = document.getElementById('chat-notif');
+      if (notif) {
+        notif.textContent = _chatUnread > 9 ? '9+' : _chatUnread;
+        notif.style.display = 'flex';
+      }
+    }
+  }
 }
 
 function scrollChatToBottom() {
   const container = document.getElementById('chat-messages');
-  if (container) container.scrollTop = container.scrollHeight;
+  if (container) {
+    // Use requestAnimationFrame to ensure DOM has updated
+    requestAnimationFrame(() => { container.scrollTop = container.scrollHeight; });
+  }
 }
 
-function _chatTime() {
+function _chatNow() {
   const d = new Date();
   return `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
 }
 
 function _chatMarkdown(text) {
-  return text
+  return String(text)
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
     .replace(/\n/g, '<br>');
 }
+
+// Inject greeting bubble once on page load
+window.addEventListener('DOMContentLoaded', () => {
+  appendChatBubble(
+    'ai',
+    'สวัสดีครับ! 🤖 ผมคือ AI Trading Brain\n\nถามผมได้ทุกเรื่อง — สถานะ, win rate, กลยุทธ์, ความคิดของผม หรืออะไรก็ได้\n\nผมจะรายงานผลเทรดให้ทราบด้วยโดยอัตโนมัติ',
+    _chatNow(),
+    true
+  );
+});
 
 // ── Live Logs ─────────────────────────────────────────────────────────────────
 let _logFilter  = 'all';

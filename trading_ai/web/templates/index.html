@@ -230,7 +230,6 @@
       <div class="sidebar-tab active" data-tab="brain"    onclick="switchTab('brain')">🧠 Brain</div>
       <div class="sidebar-tab" data-tab="history"         onclick="switchTab('history')">📋 History</div>
       <div class="sidebar-tab" data-tab="settings"        onclick="switchTab('settings')">⚙️ Settings</div>
-      <div class="sidebar-tab" data-tab="chat" id="tab-btn-chat" onclick="switchTab('chat')">💬 Chat</div>
     </div>
 
     <div class="sidebar-content">
@@ -529,33 +528,6 @@
 
       </div>
 
-      <!-- ── Chat panel ── -->
-      <div id="tab-chat" class="tab-panel chat-panel-wrap">
-
-        <div class="chat-header">
-          <span class="chat-ai-name">🤖 AI Trading Brain</span>
-          <span class="chat-status-dot" id="chat-status-dot"></span>
-        </div>
-
-        <div id="chat-messages" class="chat-messages">
-          <div class="chat-bubble ai">
-            <div class="chat-text">สวัสดีครับ! 🤖 ผมคือ AI Trading Brain<br>ถามผมได้เลยเกี่ยวกับสถานะ, win rate, กลยุทธ์, กฎ, ความไม่แน่นอน หรือสรุปภาพรวม<br><br>พิมพ์ <b>ช่วย</b> เพื่อดูรายการคำถามทั้งหมด</div>
-            <div class="chat-time">--:--</div>
-          </div>
-        </div>
-
-        <div class="chat-input-row">
-          <input
-            type="text"
-            id="chat-input"
-            class="chat-input"
-            placeholder="พิมพ์คำถามแล้วกด Enter…"
-            onkeydown="if(event.key==='Enter')sendChatMessage()"
-          />
-          <button class="chat-send-btn" onclick="sendChatMessage()">➤</button>
-        </div>
-
-      </div>
 
     </div><!-- /.sidebar-content -->
   </aside>
@@ -591,6 +563,44 @@
 
 <!-- ════════════════════════ TOAST ═════════════════════════════ -->
 <div id="toast-container"></div>
+
+<!-- ══════════════════ FLOATING CHAT WIDGET ══════════════════ -->
+<div id="chat-widget">
+  <!-- Toggle button -->
+  <button id="chat-float-btn" class="chat-float-btn" onclick="toggleChat()" title="คุยกับ AI">
+    💬
+    <span id="chat-notif" class="chat-notif" style="display:none">0</span>
+  </button>
+
+  <!-- Chat panel (hidden by default) -->
+  <div id="chat-panel" class="chat-panel" style="display:none">
+
+    <div class="chat-panel-head">
+      <div class="chat-panel-title">
+        <span class="chat-dot-live"></span>
+        🤖 AI Trading Brain
+      </div>
+      <button class="chat-close-btn" onclick="toggleChat()">✕</button>
+    </div>
+
+    <div id="chat-messages" class="chat-messages">
+      <!-- JS injects greeting on load -->
+    </div>
+
+    <div class="chat-panel-input">
+      <input
+        type="text"
+        id="chat-input"
+        class="chat-input"
+        placeholder="พิมพ์คำถาม… (Enter ส่ง)"
+        onkeydown="if(event.key==='Enter')sendChatMessage()"
+        autocomplete="off"
+      />
+      <button class="chat-send-btn" onclick="sendChatMessage()">➤</button>
+    </div>
+
+  </div>
+</div>
 
 <script src="/static/js/charts.js"></script>
 <script src="/static/js/main.js"></script>

@@ -70,7 +70,625 @@ _log_broadcasting = False                # re-entrancy guard for the WS handler
 _chat_history: deque = deque(maxlen=100)
 
 
-class TradingAIChat:
+class ThinkingAI:
+    """
+    AI ที่ "คิด" จริง — สังเกต วิเคราะห์ และแสดงความเห็นจาก brain state จริงๆ
+    ไม่ใช่ตอบตาม script ที่ถูกตั้งไว้
+    """
+
+    def _ctx(self) -> dict:
+        trades = _trade_stats.get("trades", 0)
+        wins   = _trade_stats.get("wins", 0)
+        ctx = {
+            "trades":     trades,
+            "wins":       wins,
+            "pnl":        _trade_stats.get("pnl", 0.0),
+            "wr":         wins / max(trades, 1),
+            "ai_running": _ai_running,
+            "balance":    (_connector.get_balance() if _connector else 0.0),
+        }
+        if _brain:
+            try:
+                st = _brain.get_status()
+                ctx.update({
+                    "brain_age":   st.get("brain_age", 0),
+                    "brain_stage": st.get("brain_stage", ""),
+                    "brain_emoji": st.get("brain_emoji", ""),
+                    "brain_score": st.get("brain_score", 0),
+                    "nodes":       st.get("graph_nodes", 0),
+                    "episodes":    st.get("episodic_memories", 0),
+                    "regime":      _brain._last_regime,
+                    "confidence":  _brain._last_confidence,
+                    "strategy":    _brain._last_strategy_name,
+                    "uncertainty": _brain._last_uncertainty or {},
+                    "rules":       _brain.rule_distiller.get_rules(),
+                    "seq_stats":   _brain.sequence_memory.stats(),
+                    "tips":        st.get("improvement_tips", []),
+                    "mistakes":    st.get("recent_mistakes", []),
+                    "top_ind":     st.get("top_indicators", []),
+                    "strategies":  st.get("strategy_stats", []),
+                    "pause":       st.get("should_pause", False),
+                })
+            except Exception:
+                pass
+        if _capital_guard:
+            ctx["cg"] = _capital_guard.status()
+        return ctx
+
+    def think(self, message: str) -> str:
+        ctx = self._ctx()
+        msg = message.strip().lower()
+
+        if any(w in msg for w in {"สวัสดี","hello","hi","หวัดดี","hey","ดีครับ","ดีค่ะ"}):
+            return self._greet(ctx)
+        if any(w in msg for w in {"เก่งขึ้น","improve","ดีขึ้น","พัฒนา","better","จะเก่ง"}):
+            return self._on_improvement(ctx)
+        if any(w in msg for w in {"ทำไม","why","เหตุผล","reason","อธิบาย"}):
+            return self._on_why(ctx)
+        if any(w in msg for w in {"win rate","อัตราชนะ","ชนะ","แพ้","เสีย","trade","เทรด"}):
+            return self._on_performance(ctx)
+        if any(w in msg for w in {"ตลาด","market","regime","trend","ranging","volatile"}):
+            return self._on_market(ctx)
+        if any(w in msg for w in {"ความจำ","memory","จำ","pattern","sequence","episodic"}):
+            return self._on_memory(ctx)
+        if any(w in msg for w in {"uncertainty","ไม่แน่นอน","มั่นใจ","epistemic"}):
+            return self._on_uncertainty(ctx)
+        if any(w in msg for w in {"กฎ","rule","distil","สกัด"}):
+            return self._on_rules(ctx)
+        if any(w in msg for w in {"กลยุทธ์","strategy","วิธี"}):
+            return self._on_strategy(ctx)
+        if any(w in msg for w in {"balance","เงิน","ยอด","กำไร","ขาดทุน","pnl"}):
+            return self._on_balance(ctx)
+        if any(w in msg for w in {"capitalguard","capital","guard","หยุด","ป้องกัน","limit"}):
+            return self._on_capguard(ctx)
+        if any(w in msg for w in {"สรุป","สถานะ","status","ตอนนี้","เป็นยังไง","overview"}):
+            return self._full_reflection(ctx)
+        if any(w in msg for w in {"ต้องการ","อยาก","want","need","ขอ","ปรับปรุง"}):
+            return self._on_needs(ctx)
+        if any(w in msg for w in {"คิด","think","รู้สึก","feel","สังเกต","observe","ช่วย","help"}):
+            return self._general_reflection(ctx)
+
+        # ไม่ตรงกับ keyword ใดเลย → ไม่บอกว่าไม่รู้ แต่คิดให้
+        return self._general_reflection(ctx)
+
+    # ── Response generators ────────────────────────────────────────────────────
+
+    def _greet(self, ctx) -> str:
+        trades  = ctx.get("trades", 0)
+        wr      = ctx.get("wr", 0)
+        running = ctx.get("ai_running", False)
+        regime  = ctx.get("regime", "unknown")
+        if trades == 0:
+            return (
+                "สวัสดีครับ! 🤖 ผมพร้อมทำงานแล้ว\n\n"
+                "ตอนนี้ยังไม่มีข้อมูล trade เลย รอคำสั่ง Start AI ครับ\n"
+                "ถามผมได้ทุกเรื่อง — เกี่ยวกับตลาด สถานะ หรืออะไรก็ได้"
+            )
+        status = "กำลังทำงาน" if running else "หยุดพักอยู่"
+        mood   = "ผมพอใจกับผลลัพธ์" if wr > 0.5 else "ยังเรียนรู้อยู่ครับ"
+        return (
+            f"สวัสดีครับ! 🤖 ผม{status}อยู่\n\n"
+            f"เทรดมา {trades} ไม้ win rate {wr:.1%} — {mood}\n"
+            f"ตลาดตอนนี้: {regime.upper()} regime\n\n"
+            "ถามผมได้เลยครับ ทั้งเรื่องสถานะ การเรียนรู้ ความคิดของผม หรืออะไรก็ได้"
+        )
+
+    def _on_improvement(self, ctx) -> str:
+        trades   = ctx.get("trades", 0)
+        wr       = ctx.get("wr", 0)
+        episodes = ctx.get("episodes", 0)
+        u        = ctx.get("uncertainty", {})
+        seq      = ctx.get("seq_stats", {})
+        rules    = ctx.get("rules", [])
+        tips     = ctx.get("tips", [])
+
+        parts = ["ได้ครับ แต่ต้องใช้เวลา ผมวิเคราะห์สิ่งที่ต้องพัฒนา:\n"]
+
+        familiar  = u.get("familiar_trades", 0)
+        epistemic = u.get("epistemic", 0.85)
+        if epistemic > 0.6:
+            needed = max(15 - familiar, 0)
+            parts.append(
+                f"🔮 Epistemic uncertainty {epistemic:.0%}: เคยเห็นสภาวะนี้แค่ {familiar} ครั้ง "
+                f"ต้องการอีก {needed} ครั้งเพื่อให้ uncertainty ลดลง"
+            )
+
+        if episodes < 50:
+            parts.append(
+                f"🧠 Episodic memory {episodes} ครั้ง (ต้องการ 50+) "
+                "เพื่อให้การ recall similar situations แม่นขึ้น"
+            )
+
+        seq_trusted = seq.get("trusted_sequences", 0)
+        if seq_trusted < 10:
+            parts.append(
+                f"📊 Sequence memory: trusted {seq_trusted} patterns "
+                "ต้องการ 10+ เพื่อทำนาย direction จาก trajectory ได้"
+            )
+
+        if not rules:
+            rd_stats = (_brain.rule_distiller.stats() if _brain else {})
+            w = rd_stats.get("wins_in_log", 0)
+            parts.append(f"📋 Distilled rules: ยังไม่มี ต้องการ wins อีก {max(30-w,0)} ครั้ง")
+        else:
+            parts.append(f"📋 Distilled rules: มีแล้ว {len(rules)} กฎ กำลังพัฒนาต่อ")
+
+        if wr < 0.45:
+            parts.append(
+                f"⚠️ Win rate {wr:.1%} ต่ำกว่าที่ควร — ผมคิดว่าเพราะข้อมูลยังน้อย "
+                f"({trades} ไม้) brain ยังไม่ converge ต้องเทรดต่อ"
+            )
+        elif wr > 0.60:
+            parts.append(f"✅ Win rate {wr:.1%} ดีแล้ว! กำลัง refine กฎให้แม่นขึ้น")
+
+        if tips:
+            parts.append("💡 AI วิเคราะห์ว่าควรปรับ:\n" + "\n".join(f"  • {t}" for t in tips[:3]))
+
+        return "\n\n".join(parts)
+
+    def _on_why(self, ctx) -> str:
+        confidence = ctx.get("confidence", 0.5)
+        regime     = ctx.get("regime", "unknown")
+        strategy   = ctx.get("strategy", "Unknown")
+        u          = ctx.get("uncertainty", {})
+        mistakes   = ctx.get("mistakes", [])
+        rules      = ctx.get("rules", [])
+
+        parts = [
+            f"🤔 เหตุผลที่ผมตัดสินใจแบบนี้\n\n"
+            f"กลยุทธ์ที่เลือก: {strategy}\n"
+            f"Regime: {regime.upper()} | Confidence หลังปรับ: {confidence:.1%}"
+        ]
+
+        if u:
+            mult = u.get("conf_multiplier", 1.0)
+            fam  = u.get("familiar_trades", 0)
+            if mult < 0.9:
+                parts.append(
+                    f"\nUncertainty ลด confidence ×{mult:.2f} "
+                    f"เพราะผมเห็นสภาวะนี้แค่ {fam} ครั้ง"
+                )
+
+        if mistakes:
+            latest = mistakes[0]
+            parts.append(f"\nความผิดพลาดล่าสุด: {latest.get('lesson','N/A')}")
+
+        if rules:
+            r = rules[0]
+            parts.append(
+                f"\nกฎที่ผมเชื่อมากที่สุด: "
+                f"{r['indicator'].upper()} {r['condition']} → {r['direction'].upper()} "
+                f"(confidence {r['confidence']:.0%})"
+            )
+
+        return "\n".join(parts)
+
+    def _on_performance(self, ctx) -> str:
+        trades   = ctx.get("trades", 0)
+        wins     = ctx.get("wins", 0)
+        pnl      = ctx.get("pnl", 0.0)
+        wr       = ctx.get("wr", 0)
+        episodes = ctx.get("episodes", 0)
+
+        if trades == 0:
+            return "ยังไม่มีข้อมูล trade เลยครับ — รอ AI เริ่มทำงานก่อน"
+
+        if wr < 0.35:
+            assessment = (
+                "ผมแพ้บ่อยมาก แต่นี่เป็นเรื่องปกติในช่วง exploration "
+                "ผมกำลังสะสมข้อมูลเพื่อเข้าใจว่า pattern ไหนใช้งานได้จริง"
+            )
+        elif wr < 0.50:
+            assessment = (
+                "win rate ต่ำกว่า 50% ผมกำลังหา edge ที่แน่นอน "
+                "ต้องเทรดต่อเพื่อให้ episodic memory สะสมมากพอ"
+            )
+        elif wr < 0.65:
+            assessment = "win rate พอใช้ได้ กำลัง refine สัญญาณให้แม่นขึ้น"
+        else:
+            assessment = "win rate ดีมากครับ! กำลัง exploit edge ที่เจอแล้ว"
+
+        note = ""
+        if trades < 20:
+            note = f"\n\n⚠️ ข้อมูลยังน้อย ({trades} ไม้) สถิตินี้ยังไม่ reliable ต้องดูที่ 50+ ไม้"
+
+        return (
+            f"📊 ประสิทธิภาพปัจจุบัน\n\n"
+            f"เทรด: {trades} ไม้ | ชนะ: {wins} | แพ้: {trades-wins}\n"
+            f"Win Rate: {wr:.1%}\n"
+            f"P&L: {pnl:+.2f} USD\n\n"
+            f"💭 ผมวิเคราะห์: {assessment}"
+            f"{note}"
+        )
+
+    def _on_market(self, ctx) -> str:
+        regime    = ctx.get("regime", "unknown")
+        u         = ctx.get("uncertainty", {})
+        top_ind   = ctx.get("top_ind", [])
+
+        comments = {
+            "trending": (
+                "ผมชอบ trending market มากครับ เพราะ PPO agent ของผมออกแบบมาสำหรับ trend "
+                "ชัดๆ ทำให้ confidence ที่ได้สูงกว่าปกติ และ Ichimoku / EMA strategies ทำงานดีมาก"
+            ),
+            "ranging": (
+                "ตลาด ranging ยากกว่า trending สำหรับผม เพราะ MACD/EMA มักจะ fake-out "
+                "ผมพึ่ง mean reversion (RSI oversold/overbought) มากขึ้นใน regime นี้"
+            ),
+            "volatile": (
+                "ผมระมัดระวังมากใน volatile market — confidence ถูกลด 15% อัตโนมัติ "
+                "และผมข้ามหลาย trade ที่ไม่แน่ใจ เพราะ risk สูงเกินไป"
+            ),
+            "unknown": "ยังไม่ได้ประเมิน regime ครับ รอ AI วิเคราะห์ตลาดก่อน",
+        }
+        my_take = comments.get(regime, f"Regime ปัจจุบัน: {regime}")
+
+        result = f"📈 สภาวะตลาด: {regime.upper()}\n\n💭 ผมสังเกตว่า: {my_take}"
+
+        familiar = u.get("familiar_trades", 0)
+        if familiar < 5:
+            result += f"\n\n⚠️ ผมยังไม่คุ้นเคยกับสภาวะนี้มากพอ (เจอมาแค่ {familiar} ครั้ง) กำลัง explore อยู่"
+
+        if top_ind:
+            ind_str = ", ".join(f"{n}({v:.0%})" for n, v in top_ind[:3])
+            result += f"\n\n🎯 Indicators ที่ผมไว้วางใจมากที่สุดตอนนี้: {ind_str}"
+
+        return result
+
+    def _on_memory(self, ctx) -> str:
+        episodes    = ctx.get("episodes", 0)
+        seq         = ctx.get("seq_stats", {})
+        u           = ctx.get("uncertainty", {})
+
+        seq_total   = seq.get("total_sequences", 0)
+        seq_trusted = seq.get("trusted_sequences", 0)
+        seq_fill    = seq.get("window_fill", 0)
+
+        epi_comment = (
+            "น้อยมาก ทำให้ recall similar situations ไม่แม่น"      if episodes < 20 else
+            "พอเริ่มมีข้อมูลบ้าง แต่ยังต้องการอีก"                 if episodes < 50 else
+            "เริ่มมีฐานข้อมูลที่ดีแล้ว กำลัง extract patterns"
+        )
+        seq_comment = (
+            f"Window กำลัง fill: {seq_fill}/8 — รอให้ครบแล้วจะเริ่มจำ trajectory ได้"
+            if seq_fill < 8 else
+            f"มี {seq_trusted} patterns ที่ trust ได้ ({seq_total} ทั้งหมด)"
+        )
+
+        return (
+            f"🧩 สถานะความจำของผม\n\n"
+            f"Episodic Memory: {episodes} ครั้ง — {epi_comment}\n\n"
+            f"Sequence Memory (8-trade trajectory):\n{seq_comment}\n\n"
+            f"💭 ผมต้องการ episodic 50+ ไม้ และ sequence trusted 10+ patterns "
+            f"ก็จะช่วยให้ uncertainty ลดจาก {u.get('epistemic',0):.0%} ลงมาได้มาก"
+        )
+
+    def _on_uncertainty(self, ctx) -> str:
+        u = ctx.get("uncertainty", {})
+        if not u:
+            return "ยังไม่มีข้อมูล uncertainty ครับ — รอ AI วิเคราะห์ตลาดก่อน"
+
+        epi      = u.get("epistemic", 0)
+        ale      = u.get("aleatoric", 0)
+        familiar = u.get("familiar_trades", 0)
+        mult     = u.get("conf_multiplier", 1.0)
+        desc     = u.get("description", "")
+
+        if epi > 0.75 and ale > 0.70:
+            my_take = "ผมคิดว่าควรข้ามการเทรดตอนนี้ครับ — ทั้ง 2 ระบบบอกว่า 'ไม่รู้จริงๆ'"
+        elif epi > 0.6:
+            my_take = f"ผมไม่คุ้นกับสภาวะนี้ (เห็นมาแค่ {familiar} ครั้ง) ต้องเทรดต่อเพื่อสะสมประสบการณ์"
+        elif ale > 0.6:
+            my_take = "สัญญาณมีความวุ่นวายสูง แม้จะคุ้น pattern นี้ แต่ผลยังสุ่มอยู่"
+        else:
+            my_take = "ความไม่แน่นอนอยู่ในระดับที่รับได้ ผมพอจะ trade ได้อย่างมั่นใจ"
+
+        return (
+            f"🔮 ความไม่แน่นอนของผม\n\n"
+            f"Epistemic (ไม่รู้จักสภาวะ): {epi:.0%}\n"
+            f"Aleatoric (สัญญาณ noisy): {ale:.0%}\n"
+            f"Confidence ถูกปรับ: ×{mult:.2f}\n"
+            f"เจอสภาวะนี้มา: {familiar} ครั้ง\n\n"
+            f"📝 {desc}\n\n"
+            f"🗣️ ผมคิดว่า: {my_take}"
+        )
+
+    def _on_rules(self, ctx) -> str:
+        rules = ctx.get("rules", [])
+
+        if not rules:
+            rd_stats  = (_brain.rule_distiller.stats() if _brain else {})
+            wins_so_far = rd_stats.get("wins_in_log", 0)
+            needed    = max(30 - wins_so_far, 0)
+            return (
+                f"📋 ยังไม่มีกฎที่ distill ได้\n\n"
+                f"ผมต้องการ wins อีก {needed} ครั้ง (มีแล้ว {wins_so_far}/30)\n\n"
+                f"💭 ผมจะวิเคราะห์ว่า indicator ไหนมีค่าสม่ำเสมอใน winning trades "
+                f"แล้ว distill ออกมาเป็นกฎ IF-THEN ที่ชัดเจน"
+            )
+
+        lines = [f"📋 กฎที่ผม distill ได้ ({len(rules)} ข้อ):\n"]
+        for i, r in enumerate(rules, 1):
+            lines.append(
+                f"{i}. {r['indicator'].upper()} {r['condition']} → {r['direction'].upper()}\n"
+                f"   (confidence {r['confidence']:.0%}, n={r['n']} trades, std={r['std']:.3f})"
+            )
+        lines.append(
+            f"\n💭 ผมเชื่อกฎข้อ 1 มากที่สุด เพราะ std ต่ำสุด — "
+            f"หมายความว่า {rules[0]['indicator'].upper()} มีค่าสม่ำเสมอในทุก winning trade"
+        )
+        return "\n".join(lines)
+
+    def _on_strategy(self, ctx) -> str:
+        strategy   = ctx.get("strategy", "Unknown")
+        strategies = ctx.get("strategies", [])
+        regime     = ctx.get("regime", "unknown")
+
+        if not strategies:
+            return f"ใช้กลยุทธ์ {strategy} อยู่ครับ แต่ยังไม่มีสถิติรายกลยุทธ์"
+
+        lines = [f"🎯 กลยุทธ์ปัจจุบัน: {strategy} (regime={regime.upper()})\n"]
+        best = max(strategies, key=lambda s: s.get("win_rate", 0))
+
+        for s in strategies:
+            bar    = "█" * int(s["win_rate"] * 10) + "░" * (10 - int(s["win_rate"] * 10))
+            active = " ← ใช้อยู่" if s["name"] == strategy else ""
+            lines.append(f"  {s['name'][:18]}: {bar} {s['win_rate']:.0%}{active}")
+
+        lines.append(
+            f"\n💭 {best['name']} ทำได้ดีที่สุด ({best['win_rate']:.0%}) — "
+            f"ผมเลือกกลยุทธ์ตาม regime ปัจจุบัน: {regime.upper()}"
+        )
+        return "\n".join(lines)
+
+    def _on_balance(self, ctx) -> str:
+        bal    = ctx.get("balance", 0.0)
+        pnl    = ctx.get("pnl", 0.0)
+        trades = ctx.get("trades", 0)
+        cg     = ctx.get("cg")
+
+        result = f"💰 Balance: ${bal:.2f}\nP&L สะสม: {pnl:+.2f} USD"
+
+        if cg and cg.get("account_type") == "REAL":
+            result += (
+                f"\n\n🛡️ CapitalGuard วันนี้:\n"
+                f"  P&L: {cg['session_pnl']:+.2f}\n"
+                f"  ขาดทุน: {cg['loss_pct']:.1%}/{cg['daily_loss_limit']:.0%}\n"
+                f"  กำไร: {cg['profit_pct']:.1%}/{cg['profit_target']:.0%}"
+            )
+
+        if trades > 0:
+            result += f"\n\nเฉลี่ยต่อเทรด: {pnl/trades:+.2f} USD"
+
+        return result
+
+    def _on_capguard(self, ctx) -> str:
+        cg = ctx.get("cg")
+        if not cg:
+            return "CapitalGuard ยังไม่ได้โหลดครับ"
+
+        if cg.get("account_type") == "PRACTICE":
+            return (
+                "🎓 ตอนนี้ใช้บัญชีทดลอง (PRACTICE)\n\n"
+                "CapitalGuard ไม่ทำงาน เพราะ PRACTICE = เรียนรู้ได้ไม่จำกัด\n\n"
+                "💭 ผมคิดว่านี่ถูกต้อง — ถ้าหยุดเพราะแพ้ใน practice "
+                "ผมก็ไม่มีโอกาสเรียนรู้จากความผิดพลาดนั้น"
+            )
+
+        loss_pct   = cg.get("loss_pct", 0)
+        profit_pct = cg.get("profit_pct", 0)
+        stopped    = cg.get("stopped", False)
+
+        comment = ""
+        if stopped:
+            comment = f"\n\n⛔ หยุดแล้ว: {cg.get('stop_reason','')}"
+        elif loss_pct > 0.10:
+            comment = (
+                f"\n\n⚠️ ผมระวังมากขึ้น — ขาดทุนไปแล้ว {loss_pct:.1%} "
+                f"อีก {cg['daily_loss_limit']-loss_pct:.1%} จะหยุดวันนี้"
+            )
+        elif profit_pct > 0.05:
+            comment = (
+                f"\n\n🟢 กำไรดีครับ {profit_pct:.1%} — "
+                f"อีก {cg['profit_target']-profit_pct:.1%} จะเก็บกำไรและหยุดวันนี้"
+            )
+
+        return (
+            f"🛡️ CapitalGuard — REAL\n\n"
+            f"P&L วันนี้: {cg['session_pnl']:+.2f}\n"
+            f"ขาดทุน: {loss_pct:.1%}/{cg['daily_loss_limit']:.0%}\n"
+            f"กำไร: {profit_pct:.1%}/{cg['profit_target']:.0%}\n"
+            f"Kelly bet: ${cg['kelly_amount']:.2f}"
+            + comment
+        )
+
+    def _on_needs(self, ctx) -> str:
+        episodes    = ctx.get("episodes", 0)
+        rules       = ctx.get("rules", [])
+        seq         = ctx.get("seq_stats", {})
+        u           = ctx.get("uncertainty", {})
+        trades      = ctx.get("trades", 0)
+
+        wants = []
+        if episodes < 100:
+            wants.append(
+                f"📊 Episodic memory อีก {100-episodes} ครั้ง (มีแล้ว {episodes}/100) "
+                "เพื่อให้ recall similar situations แม่นขึ้น"
+            )
+        if not rules:
+            w = (_brain.rule_distiller.stats() if _brain else {}).get("wins_in_log", 0)
+            wants.append(f"📋 Wins อีก {max(30-w,0)} ครั้งเพื่อ distill กฎครั้งแรก (มี {w}/30)")
+        seq_fill = seq.get("window_fill", 0)
+        if seq_fill < 8:
+            wants.append(f"🔄 Sequence window ให้ครบ {seq_fill}/8 เพื่อเริ่มจำ trajectory ได้")
+        familiar = u.get("familiar_trades", 0)
+        if familiar < 10:
+            wants.append(
+                f"🔮 เจอสภาวะตลาดนี้อีก {10-familiar} ครั้ง "
+                f"(เจอมาแล้ว {familiar}) เพื่อลด epistemic uncertainty"
+            )
+        if trades < 50:
+            wants.append(f"⏳ เทรดให้ครบ 50 ไม้ก่อน (ตอนนี้ {trades}) สถิติยังไม่ stable")
+
+        if not wants:
+            return "ตอนนี้ผมพอใจกับข้อมูลที่มีครับ กำลัง optimize กฎที่มีอยู่"
+
+        return "💭 สิ่งที่ผมต้องการตอนนี้:\n\n" + "\n\n".join(wants)
+
+    def _full_reflection(self, ctx) -> str:
+        trades      = ctx.get("trades", 0)
+        wr          = ctx.get("wr", 0)
+        pnl         = ctx.get("pnl", 0)
+        running     = ctx.get("ai_running", False)
+        regime      = ctx.get("regime", "unknown")
+        balance     = ctx.get("balance", 0)
+        episodes    = ctx.get("episodes", 0)
+        brain_stage = ctx.get("brain_stage", "ทารก")
+        brain_emoji = ctx.get("brain_emoji", "👶")
+        brain_score = ctx.get("brain_score", 0)
+
+        status = "🟢 ทำงาน" if running else "🔴 หยุด"
+        return (
+            f"📊 สถานะรวม\n\n"
+            f"AI: {status} | Balance: ${balance:.2f}\n"
+            f"Win Rate: {wr:.1%} | {trades} ไม้ | P&L: {pnl:+.2f}\n"
+            f"Brain: {brain_emoji} {brain_stage} (score {brain_score}/100)\n"
+            f"Regime: {regime.upper()} | Episodes: {episodes}\n\n"
+            + self._brief_thought(ctx)
+        )
+
+    def _brief_thought(self, ctx) -> str:
+        wr       = ctx.get("wr", 0)
+        episodes = ctx.get("episodes", 0)
+        u        = ctx.get("uncertainty", {})
+        rules    = ctx.get("rules", [])
+        trades   = ctx.get("trades", 0)
+
+        if trades == 0:
+            return "💭 ยังไม่มีข้อมูลเลยครับ รอ AI เริ่มทำงาน"
+        if episodes < 10:
+            return "💭 อยู่ในช่วงเริ่มต้น กำลังสะสมประสบการณ์ครับ"
+        if wr < 0.40:
+            return "💭 win rate ยังต่ำอยู่ นี่เป็นช่วงที่ brain กำลัง explore หา edge"
+        if u.get("epistemic", 0) > 0.7:
+            return f"💭 ยังไม่คุ้นเคยกับสภาวะตลาดนี้ (เจอมาแค่ {u.get('familiar_trades',0)} ครั้ง)"
+        if rules:
+            r = rules[0]
+            return f"💭 กฎที่ผมเชื่อตอนนี้: {r['indicator'].upper()} {r['condition']} → {r['direction'].upper()}"
+        return "💭 กำลัง distill กฎจากประสบการณ์ที่สะสมมา"
+
+    def _general_reflection(self, ctx) -> str:
+        """สำหรับทุกคำถามที่ไม่ตรงกับ category ใด — AI แสดงความคิดจากสถานการณ์จริง"""
+        trades   = ctx.get("trades", 0)
+        wr       = ctx.get("wr", 0)
+        episodes = ctx.get("episodes", 0)
+        regime   = ctx.get("regime", "unknown")
+        u        = ctx.get("uncertainty", {})
+        rules    = ctx.get("rules", [])
+        seq      = ctx.get("seq_stats", {})
+        tips     = ctx.get("tips", [])
+
+        if trades == 0:
+            return "ผมยังไม่ได้เทรดเลยครับ รอ AI เริ่มทำงานเพื่อให้มีข้อมูล"
+
+        observations = []
+
+        if regime == "trending":
+            observations.append("สังเกตว่าตลาดตอนนี้ trending ชัดเจน — นี่คือสภาวะที่ผมทำได้ดีที่สุด")
+        elif regime == "volatile":
+            observations.append("ตลาดผันผวนสูง ผมระมัดระวังมากกว่าปกติตอนนี้")
+
+        if wr < 0.40:
+            observations.append(
+                f"win rate {wr:.1%} ยังต่ำอยู่ ผมคิดว่าเป็นเพราะ episodic memory "
+                f"แค่ {episodes} ครั้ง ยังน้อยเกินไปที่จะ converge"
+            )
+        elif wr > 0.60:
+            observations.append(f"win rate {wr:.1%} กำลังดีครับ pattern ที่ผมใช้กำลังทำงาน")
+
+        epi = u.get("epistemic", 0)
+        familiar = u.get("familiar_trades", 0)
+        if epi > 0.6:
+            observations.append(
+                f"ความไม่แน่นอนยังสูง (epistemic {epi:.0%}) "
+                f"เพราะผมเห็นสภาวะนี้แค่ {familiar} ครั้ง"
+            )
+
+        seq_trusted = seq.get("trusted_sequences", 0)
+        if seq_trusted > 0:
+            observations.append(f"Sequence memory เริ่มจำ trajectory ได้แล้ว {seq_trusted} patterns")
+        elif seq.get("window_fill", 0) < 8:
+            observations.append(
+                f"Sequence memory กำลัง fill window ({seq.get('window_fill',0)}/8) "
+                "รอให้ครบแล้วจะช่วยทำนาย trajectory ได้"
+            )
+
+        if rules:
+            r = rules[0]
+            observations.append(
+                f"กฎที่ผมเชื่อตอนนี้: {r['indicator'].upper()} {r['condition']} → "
+                f"{r['direction'].upper()} (confidence {r['confidence']:.0%})"
+            )
+        else:
+            w = (_brain.rule_distiller.stats() if _brain else {}).get("wins_in_log", 0)
+            observations.append(f"ยังไม่มีกฎที่ distill ได้ (wins {w}/30)")
+
+        if tips:
+            observations.append(f"สิ่งที่ต้องปรับปรุง: {tips[0]}")
+
+        return "💭 ความคิดของผมตอนนี้:\n\n" + "\n\n".join(observations)
+
+    @staticmethod
+    def generate_trade_commentary(action: str, asset: str, pnl: float,
+                                   signal=None, stats: dict = None) -> str:
+        """สร้าง commentary อัตโนมัติหลังเทรดเสร็จ — ไม่ต้องถามก็แสดงความคิด"""
+        stats  = stats or {}
+        trades = stats.get("trades", 0)
+        wins   = stats.get("wins", 0)
+        wr     = wins / max(trades, 1)
+
+        result_emoji = "✅ WIN" if pnl > 0 else "❌ LOSS"
+        parts = [f"{result_emoji} {action} {asset}: {pnl:+.2f} USD"]
+
+        if signal and hasattr(signal, "reasoning") and signal.reasoning:
+            parts.append("เหตุผล: " + " | ".join(signal.reasoning[:2]))
+
+        parts.append(f"Win rate: {wr:.1%} ({wins}/{trades})")
+
+        if pnl > 0:
+            if wr > 0.65:
+                parts.append("💭 กำลัง on a roll — pattern นี้ใช้งานได้ดีมากตอนนี้")
+            else:
+                parts.append("💭 ชนะครั้งนี้ กำลังเรียนรู้ว่า pattern ไหนเชื่อถือได้")
+        else:
+            u = (_brain._last_uncertainty if _brain else {}) or {}
+            if u.get("epistemic", 0) > 0.6:
+                parts.append(
+                    f"💭 แพ้ครั้งนี้ ส่วนหนึ่งเพราะ uncertainty สูง "
+                    f"(เคยเห็นสภาวะนี้แค่ {u.get('familiar_trades',0)} ครั้ง) "
+                    "กำลังสะสมข้อมูลเพิ่ม"
+                )
+            else:
+                parts.append("💭 แพ้ครั้งนี้ กำลังวิเคราะห์ว่าต้องปรับ weight ของ indicator ไหน")
+
+        return "\n".join(parts)
+
+
+def _broadcast_ai_thought(action: str, asset: str, pnl: float, signal=None) -> None:
+    """เรียกจาก _ai_loop() หลังได้ผลเทรด — AI แสดงความคิดแบบเชิงรุก"""
+    try:
+        msg = ThinkingAI.generate_trade_commentary(
+            action=action, asset=asset, pnl=pnl,
+            signal=signal, stats=_trade_stats,
+        )
+        ts    = time.strftime("%H:%M")
+        entry = {"role": "ai", "message": msg, "time": ts}
+        _chat_history.append(entry)
+        broadcast_sync({"type": "chat_ai", **entry})
+    except Exception as exc:
+        logger.debug("_broadcast_ai_thought error: %s", exc)
+
+
     """
     AI chat interface — ตอบคำถามเกี่ยวกับระบบ AI trading ด้วยภาษาไทย
     ใช้ข้อมูลจาก brain, trade_stats, capital_guard เพื่อตอบแบบ real-time
@@ -655,7 +1273,7 @@ async def _handle_client_message(ws: WebSocket, msg: Dict):
             ts = time.strftime("%H:%M")
             user_entry = {"role": "user", "message": user_msg, "time": ts}
             _chat_history.append(user_entry)
-            ai_reply = TradingAIChat().respond(user_msg)
+            ai_reply = ThinkingAI().think(user_msg)
             ai_entry = {"role": "ai", "message": ai_reply, "time": ts}
             _chat_history.append(ai_entry)
             await manager.send(ws, {"type": "chat_ai", **ai_entry})
@@ -887,6 +1505,9 @@ def _ai_loop():
 
     obs, _ = _env.reset()
 
+    # ── Asset unavailability backoff (asset → timestamp unavailable until) ──
+    _unavail: Dict[str, float] = {}
+
     # ── CapitalGuard init ──────────────────────────────────────────────────
     if _capital_guard is None:
         from trading_ai.brain.capital_guard import CapitalGuard
@@ -924,6 +1545,9 @@ def _ai_loop():
         for display_name in OTC_ASSETS:
             api_name = _resolved_asset_names.get(display_name)
             if not api_name:
+                continue
+            # Skip temporarily unavailable assets (5-minute backoff)
+            if _unavail.get(api_name, 0) > time.time():
                 continue
             _env.set_asset(api_name)
             try:
@@ -1016,6 +1640,11 @@ def _ai_loop():
         _env._trade_amount = trade_amount   # pass Kelly amount to env
         next_obs, reward, terminated, truncated, info = _env.step(final_action)
 
+        # If a trade was attempted but rejected (e.g. asset not available), back off 5 min
+        if info.get("skipped", False) and final_action != 0:
+            _unavail[api_name] = time.time() + 300
+            logger.info("Asset %s marked unavailable for 5 min", api_name)
+
         if not info.get("skipped", False):
             pnl = info.get("pnl", 0.0)
             logger.info("Trade %s on %s completed: pnl=%+.2f total_trades=%d",
@@ -1032,6 +1661,9 @@ def _ai_loop():
             if _capital_guard:
                 _capital_guard.record_trade_pnl(pnl)
                 broadcast_sync({"type": "capital_guard", **_capital_guard.status()})
+
+            # ── AI proactive chat commentary ───────────────────────────────
+            _broadcast_ai_thought(action_name, display_name, pnl, signal)
 
             entry = {
                 "time": time.strftime("%H:%M:%S"),
