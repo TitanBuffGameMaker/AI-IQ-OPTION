@@ -1,15 +1,19 @@
 """
 CapitalGuard — เกราะป้องกันทุน สำหรับ REAL account เท่านั้น
 
-PRACTICE account: ทุก method คืนค่า default ปลอดภัย ไม่มีการหยุด
-REAL account: เปิดใช้งาน 4 ระบบป้องกัน
+PRACTICE account: ไม่มีการหยุดเลย — ยิ่งเทรดมาก ยิ่งเรียนรู้เร็ว
+  - OTC assets เป็นตลาดสังเคราะห์ที่ IQ Option สร้างขึ้น ไม่ใช่ตลาดจริง
+  - บัญชีทดลองไม่เสียเงินจริง → ให้ AI เทรดต่อเสมอ ไม่ว่าจะ loss มากแค่ไหน
+  - เป้าหมาย: สะสม trade experience ให้มากที่สุดเพื่อเรียนรู้ OTC patterns
 
-1. Daily Loss Limit   — หยุดวันนั้นทันทีถ้าขาดทุน > 20 % ของทุนต้นวัน
-2. Session Profit Target — หยุดเก็บกำไร ไม่โลภ ถ้าถึง +10 % ของทุนต้นวัน
+REAL account: เปิดใช้งาน 4 ระบบป้องกัน
+1. Daily Loss Limit   — หยุดวันนั้นทันทีถ้าขาดทุน > 20% ของทุนต้นวัน
+2. Session Profit Target — หยุดเก็บกำไร ไม่โลภ ถ้าถึง +10% ของทุนต้นวัน
 3. Kelly Criterion sizing — ปรับขนาด bet ให้เหมาะสมกับ win rate จริง
 4. Min Confidence (REAL) — threshold สูงกว่า PRACTICE เพื่อเทรดเฉพาะสัญญาณที่มั่นใจ
 
-ข้อมูลทั้งหมดคำนวณจากยอด balance ต้นวัน (reset ทุกเที่ยงคืน)
+หมายเหตุ OTC: ราคา OTC ไม่ตอบสนองต่อข่าวจริง (Fed, ECB ฯลฯ)
+  AI ต้องเรียนรู้ pattern เทคนิคของ OTC เอง ไม่ใช่จากข่าวพื้นฐาน
 """
 import logging
 import time
@@ -31,9 +35,10 @@ class CapitalGuard:
     KELLY_FRACTION        = 0.25   # ใช้ 25% ของ Full Kelly (safety margin)
 
     # ── Min confidence ตาม account + trade count ─────────────────────────────
-    #  PRACTICE: เริ่มต่ำ เพื่อให้ AI เรียนรู้ได้เยอะ
-    #  REAL: เริ่มสูงกว่า → เทรดเฉพาะเมื่อมั่นใจจริงๆ
-    _CONF_PRACTICE = [(0, 0.35), (20, 0.45), (50, 0.55), (100, 0.60)]
+    #  PRACTICE: threshold ต่ำ — ต้องการ trade volume สูงเพื่อเรียนรู้ OTC patterns
+    #            บัญชีทดลองไม่เสียเงินจริง ยิ่งเทรดมาก ยิ่งเรียนรู้เร็ว
+    #  REAL:     threshold สูง — ป้องกันเงินจริง เทรดเฉพาะสัญญาณที่มั่นใจ
+    _CONF_PRACTICE = [(0, 0.33), (50, 0.38), (200, 0.43), (500, 0.48)]
     _CONF_REAL     = [(0, 0.58), (10, 0.62), (30, 0.65), (100, 0.68)]
 
     def __init__(self, account_type: str = "PRACTICE"):

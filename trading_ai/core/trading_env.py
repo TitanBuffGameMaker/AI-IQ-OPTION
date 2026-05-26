@@ -142,22 +142,26 @@ class TradingEnv(gym.Env):
 
         self._recent_trades.append(1 if not info.get("skipped") else 0)
 
-        # Circuit breakers
-        if self._daily_pnl <= -config.DAILY_LOSS_LIMIT:
-            logger.warning("Daily loss limit hit")
-            terminated = True
-        if self._consecutive_losses >= config.MAX_CONSECUTIVE_LOSSES:
-            logger.warning("Too many consecutive losses")
-            terminated = True
+        # Circuit breakers — REAL account only.
+        # PRACTICE: never stop; every trade is a free learning experience.
+        # OTC assets are synthetic — losses don't cost real money in practice.
+        _is_real = config.IQ_ACCOUNT_TYPE.upper() == "REAL"
+        if _is_real:
+            if self._daily_pnl <= -config.DAILY_LOSS_LIMIT:
+                logger.warning("Daily loss limit hit")
+                terminated = True
+            if self._consecutive_losses >= config.MAX_CONSECUTIVE_LOSSES:
+                logger.warning("Too many consecutive losses")
+                terminated = True
 
-        # Drawdown protection
-        current_bal = self._balance_start + self._episode_pnl
-        if current_bal > self._peak_balance:
-            self._peak_balance = current_bal
-        drawdown = (self._peak_balance - current_bal) / (self._peak_balance + 1e-9)
-        if drawdown > 0.2:  # >20% drawdown จาก peak
-            logger.warning("Max drawdown reached: %.1f%%", drawdown * 100)
-            terminated = True
+            # Drawdown protection (REAL only)
+            current_bal = self._balance_start + self._episode_pnl
+            if current_bal > self._peak_balance:
+                self._peak_balance = current_bal
+            drawdown = (self._peak_balance - current_bal) / (self._peak_balance + 1e-9)
+            if drawdown > 0.2:
+                logger.warning("Max drawdown reached: %.1f%%", drawdown * 100)
+                terminated = True
 
         obs = self._get_observation()
         self._last_obs = obs
