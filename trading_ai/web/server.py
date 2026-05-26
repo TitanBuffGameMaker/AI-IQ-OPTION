@@ -1342,11 +1342,26 @@ def _install_ws_log_handler() -> None:
 # ── FastAPI app ───────────────────────────────────────────────────────────────
 @contextlib.asynccontextmanager
 async def _lifespan(application):
-    global _loop
+    global _loop, _ai_running
     _loop = asyncio.get_running_loop()
     _install_ws_log_handler()
     threading.Thread(target=_init_components, daemon=True).start()
-    yield
+    try:
+        yield
+    finally:
+        # ── Graceful shutdown ──────────────────────────────────────────────
+        _ai_running = False
+        if _brain:
+            try:
+                _brain.shutdown()
+                logger.info("Brain saved on shutdown.")
+            except Exception as _e:
+                logger.debug("Brain shutdown: %s", _e)
+        if _connector:
+            try:
+                _connector.disconnect()
+            except Exception:
+                pass
 
 
 app = FastAPI(title="IQ Option AI Trading Dashboard", docs_url=None, lifespan=_lifespan)
