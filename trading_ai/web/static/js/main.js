@@ -173,6 +173,10 @@ function handleMessage(msg) {
       }
       break;
 
+    case 'workers':
+      applyWorkers(msg);
+      break;
+
     case 'otp_required':
       showOTPModal(msg.message);
       break;
@@ -311,6 +315,12 @@ function applyInit(msg) {
   setAiState(msg.ai_running || false);
   _applyMarketModeUI(msg.market_mode || 'OTC');
   if (msg.capital_guard) applyCapitalGuard(msg.capital_guard);
+  if (msg.worker_url) {
+    const el = document.getElementById('worker-url-display');
+    if (el) el.textContent = msg.worker_url;
+    state.workerUrl = msg.worker_url;
+  }
+  applyWorkers({ count: msg.worker_count || 0 });
 }
 
 function applyConnection(msg) {
@@ -1362,4 +1372,96 @@ async function saveSmtpConfig() {
     status.textContent = '❌ บันทึกไม่สำเร็จ';
     status.style.color = 'var(--red)';
   }
+}
+
+// ── Distributed Workers ───────────────────────────────────────────────────────
+const _workerList = [];
+
+function applyWorkers(msg) {
+  const count = msg.count || 0;
+
+  // Badge on tab button
+  const badge = document.getElementById('worker-tab-badge');
+  if (badge) {
+    badge.textContent = count;
+    badge.style.display = count > 0 ? 'inline' : 'none';
+  }
+
+  // Count badge in panel
+  const countBadge = document.getElementById('worker-count-badge');
+  if (countBadge) {
+    countBadge.textContent = `${count} เครื่อง`;
+    countBadge.style.background = count > 0 ? '#00c87a' : '#555';
+  }
+
+  // Worker list (track connect events from status messages)
+  const listEl = document.getElementById('worker-list');
+  if (!listEl) return;
+  if (count === 0) {
+    listEl.innerHTML = '<div style="font-size:11px;color:var(--text-muted);text-align:center;padding:12px;">ยังไม่มี Worker เชื่อมต่อ</div>';
+  } else {
+    listEl.innerHTML = Array.from({ length: count }, (_, i) =>
+      `<div style="display:flex;align-items:center;gap:6px;padding:5px 0;border-bottom:1px solid var(--border);font-size:11px;">
+        <span style="color:#00c87a;font-size:14px;">●</span>
+        <span>Worker เครื่องที่ ${i + 1}</span>
+        <span style="margin-left:auto;color:var(--text-muted);font-size:10px;">กำลัง train</span>
+      </div>`
+    ).join('');
+  }
+}
+
+function copyWorkerUrl() {
+  const url = document.getElementById('worker-url-display')?.textContent || state.workerUrl || '';
+  navigator.clipboard.writeText(url).then(() => {
+    setStatus('📋 คัดลอก URL แล้ว!', 'success');
+  });
+}
+
+function downloadWorkerBat() {
+  const url = document.getElementById('worker-url-display')?.textContent
+    || state.workerUrl || 'ws://localhost:8000/ws/worker';
+
+  const batContent = [
+    '@echo off',
+    'chcp 65001 > nul',
+    'title AI Trading Worker',
+    'echo.',
+    'echo ================================================',
+    'echo   AI Trading Worker',
+    'echo   เชื่อมต่อเพื่อช่วย Train AI',
+    'echo ================================================',
+    'echo.',
+    '',
+    'set CONFIG=%~dp0worker_server.txt',
+    '',
+    'if exist "%CONFIG%" (',
+    '    set /p SERVER_URL=<"%CONFIG%"',
+    '    echo [OK] ใช้ server: %SERVER_URL%',
+    ') else (',
+    `    echo Server URL (เช่น ${url})`,
+    '    echo.',
+    '    set /p SERVER_URL="ใส่ URL แล้วกด Enter: "',
+    '    echo %SERVER_URL%> "%CONFIG%"',
+    '    echo [OK] บันทึกแล้ว - ครั้งต่อไปคลิกเดียว!',
+    ')',
+    '',
+    'echo.',
+    'echo กำลังติดตั้ง dependencies...',
+    'pip install websockets torch numpy --quiet --upgrade',
+    '',
+    'echo.',
+    'echo กำลังเชื่อมต่อ...',
+    'python "%~dp0worker.py" --server "%SERVER_URL%" --name "%COMPUTERNAME%"',
+    '',
+    'echo.',
+    'echo Worker หยุดทำงาน',
+    'pause',
+  ].join('\r\n');
+
+  const blob = new Blob([batContent], { type: 'text/plain' });
+  const a    = document.createElement('a');
+  a.href     = URL.createObjectURL(blob);
+  a.download = 'start_worker.bat';
+  a.click();
+  setStatus('⬇️ ดาวน์โหลด start_worker.bat แล้ว!', 'success');
 }

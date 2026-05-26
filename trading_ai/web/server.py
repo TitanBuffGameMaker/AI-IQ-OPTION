@@ -1389,6 +1389,12 @@ async def _send_current_state(ws: WebSocket):
     all_passed_cached = (
         all(r["passed"] for r in _check_results) if _check_results else False
     )
+    import socket as _sock
+    try:
+        _lan_ip = _sock.gethostbyname(_sock.gethostname())
+    except Exception:
+        _lan_ip = "localhost"
+
     await manager.send(ws, {
         "type": "init",
         "connected": _connector is not None,
@@ -1407,6 +1413,9 @@ async def _send_current_state(ws: WebSocket):
             "amount": config.TRADE_AMOUNT,
             "asset": config.ASSET,
         },
+        "server_ip":      _lan_ip,
+        "worker_count":   len(_worker_sockets),
+        "worker_url":     f"ws://{_lan_ip}:8000/ws/worker",
     })
     # Send OTC candle history so charts populate immediately
     if _candle_history:

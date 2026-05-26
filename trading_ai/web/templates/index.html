@@ -231,6 +231,7 @@
       <div class="sidebar-tab" data-tab="history"         onclick="switchTab('history')">📋 History</div>
       <div class="sidebar-tab" data-tab="settings"        onclick="switchTab('settings')">⚙️ Settings</div>
       <div class="sidebar-tab" data-tab="rules"           onclick="switchTab('rules')">🛡️ กฎ AI</div>
+      <div class="sidebar-tab" data-tab="workers"         onclick="switchTab('workers')">⚙️ Workers<span id="worker-tab-badge" style="display:none;background:#00c87a;color:#000;border-radius:8px;padding:0 5px;font-size:9px;margin-left:4px;">0</span></div>
     </div>
 
     <div class="sidebar-content">
@@ -632,6 +633,59 @@
         </div>
 
       </div><!-- /#tab-rules -->
+
+      <!-- Workers panel -->
+      <div id="tab-workers" class="tab-panel">
+        <div class="rules-section">
+          <div class="rules-section-head">
+            <span>⚙️ Worker Machines</span>
+            <span id="worker-count-badge" style="background:#00c87a;color:#000;border-radius:8px;padding:1px 7px;font-size:10px;font-weight:700;">0 เครื่อง</span>
+          </div>
+
+          <!-- Server URL Box -->
+          <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:8px;padding:10px;margin:8px 0;">
+            <div style="font-size:10px;color:var(--text-muted);margin-bottom:4px;">🌐 URL สำหรับ Worker เชื่อมต่อ</div>
+            <div style="display:flex;align-items:center;gap:6px;">
+              <code id="worker-url-display" style="flex:1;font-size:11px;background:var(--bg);padding:5px 8px;border-radius:5px;color:#00c87a;word-break:break-all;">ws://localhost:8000/ws/worker</code>
+              <button onclick="copyWorkerUrl()" style="background:var(--accent);border:none;color:#fff;border-radius:5px;padding:5px 8px;cursor:pointer;font-size:11px;white-space:nowrap;">📋 Copy</button>
+            </div>
+          </div>
+
+          <!-- How to connect -->
+          <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:8px;padding:10px;margin:8px 0;">
+            <div style="font-size:10px;color:var(--text-muted);margin-bottom:6px;">📋 วิธีเชื่อมต่อเครื่อง Worker</div>
+            <div style="font-size:10px;color:var(--text-primary);line-height:1.7;">
+              1️⃣ คัดลอก <strong>start_worker.bat</strong> ไปวางบนเครื่องอื่น<br>
+              2️⃣ ดับเบิลคลิก <strong>start_worker.bat</strong><br>
+              3️⃣ ครั้งแรก: ใส่ IP ด้านบน → กด Enter<br>
+              4️⃣ ครั้งต่อไป: ดับเบิลคลิกเดียว ✅
+            </div>
+          </div>
+
+          <!-- Download bat button -->
+          <button onclick="downloadWorkerBat()" style="width:100%;background:linear-gradient(135deg,#2962ff,#00c87a);border:none;color:#fff;border-radius:8px;padding:10px;cursor:pointer;font-size:12px;font-weight:700;margin:4px 0;">
+            ⬇️ ดาวน์โหลด start_worker.bat
+          </button>
+
+          <!-- Connected workers list -->
+          <div style="margin-top:10px;">
+            <div style="font-size:10px;color:var(--text-muted);margin-bottom:4px;">เครื่องที่เชื่อมต่ออยู่</div>
+            <div id="worker-list">
+              <div style="font-size:11px;color:var(--text-muted);text-align:center;padding:12px;">
+                ยังไม่มี Worker เชื่อมต่อ
+              </div>
+            </div>
+          </div>
+
+          <!-- FedAvg info -->
+          <div style="margin-top:8px;padding:8px;background:var(--bg-card);border-radius:6px;border-left:3px solid #7c4dff;">
+            <div style="font-size:10px;color:var(--text-muted);">
+              🔀 <strong>Federated Learning</strong><br>
+              Worker แต่ละเครื่องช่วย train PPO แล้วส่ง knowledge กลับ — เซิร์ฟเวอร์หลักรวม (FedAvg 25%) ทุกรอบ
+            </div>
+          </div>
+        </div>
+      </div><!-- /#tab-workers -->
 
 
     </div><!-- /.sidebar-content -->
