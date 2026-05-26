@@ -1418,3 +1418,93 @@ body {
   border-radius: 3px;
   transition: width 0.4s ease, background 0.4s ease;
 }
+
+/* ── NAS Panel ───────────────────────────────────────────────── */
+.nas-card {
+  background: var(--card);
+  border: 1px solid rgba(124,77,255,0.35);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  margin: 6px 0 4px;
+}
+.nas-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--purple);
+}
+.nas-gen-badge {
+  background: rgba(124,77,255,0.2);
+  color: var(--purple);
+  border-radius: 10px;
+  padding: 1px 8px;
+  font-size: 10px;
+  font-weight: 700;
+}
+.nas-champion {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  background: rgba(255,193,7,0.08);
+  border: 1px solid rgba(255,193,7,0.2);
+  border-radius: 6px;
+  margin-bottom: 6px;
+  font-size: 11px;
+}
+.nas-label    { color: var(--text-muted); font-size: 10px; }
+.nas-config-label { font-weight: 700; color: var(--text); font-family: monospace; font-size: 11px; }
+.nas-score    { margin-left: auto; font-weight: 700; color: var(--gold); }
+
+.nas-challengers { display: flex; flex-direction: column; gap: 4px; margin-bottom: 6px; }
+
+.nas-challenger {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  background: rgba(255,255,255,0.03);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  font-size: 10px;
+}
+.nas-challenger .nas-config-label { font-size: 10px; }
+.nas-challenger-progress {
+  flex: 1;
+  height: 3px;
+  background: rgba(255,255,255,0.06);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.nas-challenger-progress-fill {
+  height: 100%;
+  background: var(--purple);
+  border-radius: 2px;
+  transition: width 0.4s;
+}
+
+.nas-upgrade {
+  padding: 5px 8px;
+  background: rgba(0,200,122,0.1);
+  border: 1px solid var(--green-dim);
+  border-radius: 5px;
+  font-size: 10px;
+  color: var(--green);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 5px;
+  animation: pulseDot 2s infinite;
+}
+
+.nas-history { display: flex; flex-direction: column; gap: 2px; }
+.nas-history-item {
+  font-size: 9px;
+  color: var(--text-muted);
+  padding: 2px 4px;
+  border-left: 2px solid var(--purple);
+  padding-left: 6px;
+}

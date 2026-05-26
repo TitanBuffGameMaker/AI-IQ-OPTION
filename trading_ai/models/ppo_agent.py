@@ -325,13 +325,14 @@ class PPOAgent:
     ENTROPY_END   = 0.003
     ENTROPY_DECAY = 50_000
 
-    def __init__(self, obs_size: int, n_actions: int = 3):
-        self.obs_size  = obs_size
-        self.n_actions = n_actions
-        self.device    = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        logger.info("PPO ULTRA agent — device: %s", self.device)
+    def __init__(self, obs_size: int, n_actions: int = 3, hidden_size: int = 384):
+        self.obs_size    = obs_size
+        self.n_actions   = n_actions
+        self.hidden_size = hidden_size
+        self.device      = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        logger.info("PPO ULTRA agent — device: %s | hidden: %d", self.device, hidden_size)
 
-        self.network   = ActorCritic(obs_size, n_actions).to(self.device)
+        self.network   = ActorCritic(obs_size, n_actions, hidden_size=hidden_size).to(self.device)
         self.optimizer = optim.Adam(
             self.network.parameters(),
             lr=config.LEARNING_RATE,

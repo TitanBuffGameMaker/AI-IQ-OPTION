@@ -450,6 +450,9 @@ function applyBrain(msg) {
   // ── Graduation ────────────────────────────────────────────────────────
   if (msg.graduation) applyGraduation(msg.graduation);
 
+  // ── NAS ───────────────────────────────────────────────────────────────
+  if (msg.nas) applyNAS(msg.nas);
+
   // ── Fear system ───────────────────────────────────────────────────────
   if (msg.neuro_fear) applyFear(msg.neuro_fear);
 
@@ -514,6 +517,63 @@ function applyFear(fear) {
   // Cooldown warning
   if (fear.in_cooldown && fear.cooldown_remaining_min > 0) {
     setStatus(`⏸️ Fear Cooldown: ${fear.cooldown_reason} (${fear.cooldown_remaining_min.toFixed(0)} นาที)`, 'warn');
+  }
+}
+
+function applyNAS(nas) {
+  const genEl    = document.getElementById('nas-gen');
+  const champEl  = document.getElementById('nas-champion-label');
+  const scoreEl  = document.getElementById('nas-champion-score');
+  const challEl  = document.getElementById('nas-challengers');
+  const upgrEl   = document.getElementById('nas-upgrade');
+  const upgrLbl  = document.getElementById('nas-upgrade-label');
+  const histEl   = document.getElementById('nas-history');
+  if (!genEl) return;
+
+  genEl.textContent   = `Gen ${nas.generation || 1}`;
+  if (champEl) champEl.textContent = nas.champion || 'h384/l128/d10';
+  if (scoreEl) scoreEl.textContent = ((nas.champion_score || 0.5) * 100).toFixed(1) + '%';
+
+  // Challengers
+  if (challEl && Array.isArray(nas.challengers)) {
+    challEl.innerHTML = '';
+    nas.challengers.forEach(ch => {
+      const row = document.createElement('div');
+      row.className = 'nas-challenger';
+      const progress = ch.progress || 0;
+      const score    = ((ch.score || 0.5) * 100).toFixed(1);
+      const diff     = ((ch.score || 0.5) - (nas.champion_score || 0.5)) * 100;
+      const diffStr  = diff >= 0 ? `+${diff.toFixed(1)}%` : `${diff.toFixed(1)}%`;
+      const diffColor = diff > 0 ? 'var(--green)' : diff < -2 ? 'var(--red)' : 'var(--text-muted)';
+      row.innerHTML = `
+        <span class="nas-config-label" style="min-width:90px">${ch.label}</span>
+        <div class="nas-challenger-progress">
+          <div class="nas-challenger-progress-fill" style="width:${progress}%"></div>
+        </div>
+        <span style="font-size:10px;color:${diffColor};font-weight:700">${diffStr}</span>
+        <span style="font-size:9px;color:var(--text-muted)">${ch.trades}/${nas.eval_period}</span>
+      `;
+      challEl.appendChild(row);
+    });
+  }
+
+  // Upgrade recommendation
+  if (upgrEl && nas.recommended_upgrade) {
+    upgrEl.style.display = 'flex';
+    if (upgrLbl) upgrLbl.textContent = nas.best_ever + ` (${(nas.best_ever_score*100).toFixed(1)}%)`;
+  } else if (upgrEl) {
+    upgrEl.style.display = 'none';
+  }
+
+  // History
+  if (histEl && Array.isArray(nas.history) && nas.history.length > 0) {
+    histEl.innerHTML = '';
+    nas.history.slice(-3).reverse().forEach(h => {
+      const item = document.createElement('div');
+      item.className = 'nas-history-item';
+      item.textContent = `Gen ${h.generation}: ${h.winner} — ${(h.accuracy*100).toFixed(1)}% (${h.ts})`;
+      histEl.appendChild(item);
+    });
   }
 }
 

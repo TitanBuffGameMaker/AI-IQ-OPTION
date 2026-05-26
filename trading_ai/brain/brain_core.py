@@ -35,6 +35,8 @@ from trading_ai.brain.ethics import get_principles, evaluate_desire
 from trading_ai.brain.desire import DesireEngine
 from trading_ai.brain.graduation import GraduationSystem
 from trading_ai.brain.neuro import CLSMemory, DopamineSystem, FearSystem, SleepCycle
+from trading_ai.brain.nas import NASEngine
+from trading_ai.brain.nas.nas_engine import NASConfig
 from trading_ai.brain.working_memory import WorkingMemory
 from trading_ai.brain.strategy_library import StrategyLibrary
 from trading_ai.brain.self_reflection import SelfReflectionEngine
@@ -130,6 +132,13 @@ class BrainCore:
 
         # ── Graduation system ────────────────────────────────────────────────
         self.graduation   = GraduationSystem()
+
+        # ── Neural Architecture Search ───────────────────────────────────────
+        self.nas = NASEngine(
+            obs_size=OBS_SIZE,
+            n_actions=3,
+            champion_config=NASConfig(hidden_size=384, lstm_hidden=128, dropout=0.10),
+        )
 
         # ── State tracking ──────────────────────────────────────────────────
         self._last_strategy_name: str = "Unknown"
@@ -387,6 +396,21 @@ class BrainCore:
         )
         self._log_brain_state(pnl)
 
+        # ── NAS: evaluate challengers on same obs ───────────────────────────
+        if self._last_indicator_vec is not None:
+            self.nas.observe(
+                obs=self._last_indicator_vec,
+                actual_action=action_taken,
+                pnl=pnl,
+            )
+            if next_obs is not None:
+                self.nas.update_challengers(
+                    obs=self._last_indicator_vec,
+                    action=action_taken,
+                    pnl=pnl,
+                    next_obs=next_obs,
+                )
+
         # ── Neuroscience modules ─────────────────────────────────────────────
         # Dopamine: compute RPE to amplify/dampen learning signal
         _rpe_mult = self.dopamine.update(pnl)
@@ -546,6 +570,8 @@ class BrainCore:
             "is_sleeping":              self._is_sleeping,
             # Graduation
             "graduation":               self.graduation.evaluate(self),
+            # NAS
+            "nas":                      self.nas.stats(),
         }
 
     def shutdown(self):
