@@ -128,6 +128,10 @@ function handleMessage(msg) {
       if (msg.mode) _applyMarketModeUI(msg.mode);
       break;
 
+    case 'capital_guard':
+      applyCapitalGuard(msg);
+      break;
+
     case 'log':
       addLogEntry(msg);
       break;
@@ -277,6 +281,7 @@ function applyInit(msg) {
   applySettings(msg.settings || {});
   setAiState(msg.ai_running || false);
   _applyMarketModeUI(msg.market_mode || 'OTC');
+  if (msg.capital_guard) applyCapitalGuard(msg.capital_guard);
 }
 
 function applyConnection(msg) {
@@ -697,6 +702,77 @@ function _applyMarketModeUI(mode) {
     desc.textContent  = '📈 Real Market — news, calendar, sentiment active (ดูแนวโน้มตลาดจริง)';
     if (badge) { badge.className = 'nav-badge real'; icon.textContent = '📈'; text.textContent = 'Real'; }
   }
+}
+
+// ── Capital Guard ─────────────────────────────────────────────────────────────
+function applyCapitalGuard(msg) {
+  const panel = document.getElementById('capital-guard-panel');
+  if (!panel) return;
+
+  const isReal = (msg.account_type === 'REAL');
+  panel.style.display = isReal ? 'block' : 'none';
+  if (!isReal) return;
+
+  // Daily P&L
+  const pnl = msg.session_pnl || 0;
+  const pnlEl = document.getElementById('cg-daily-pnl');
+  if (pnlEl) {
+    pnlEl.textContent = (pnl >= 0 ? '+' : '') + '$' + pnl.toFixed(2);
+    pnlEl.style.color = pnl >= 0 ? 'var(--green)' : 'var(--red)';
+  }
+
+  // Kelly bet
+  const kellyEl = document.getElementById('cg-kelly-amount');
+  if (kellyEl && msg.kelly_amount > 0) kellyEl.textContent = '$' + msg.kelly_amount.toFixed(2);
+
+  // Min confidence (derived from account type label — will be updated via signal messages)
+  // Profit bar
+  const profitPct = Math.min((msg.profit_pct || 0) / (msg.profit_target || 0.10), 1) * 100;
+  const profitBar = document.getElementById('cg-profit-bar');
+  const profitTxt = document.getElementById('cg-profit-pct-text');
+  if (profitBar) profitBar.style.width = profitPct.toFixed(1) + '%';
+  if (profitTxt) profitTxt.textContent = ((msg.profit_pct || 0) * 100).toFixed(1) + '%';
+
+  // Target line position
+  const targetLine = document.getElementById('cg-target-line');
+  if (targetLine) targetLine.style.left = '100%';   // at 100% of bar = target
+
+  // Loss bar
+  const lossPct = Math.min((msg.loss_pct || 0) / (msg.daily_loss_limit || 0.20), 1) * 100;
+  const lossBar = document.getElementById('cg-loss-bar');
+  const lossTxt = document.getElementById('cg-loss-pct-text');
+  if (lossBar) lossBar.style.width = lossPct.toFixed(1) + '%';
+  if (lossTxt) lossTxt.textContent = ((msg.loss_pct || 0) * 100).toFixed(1) + '%';
+
+  // Labels
+  const targetPctEl = document.getElementById('cg-target-pct');
+  const limitPctEl  = document.getElementById('cg-limit-pct');
+  if (targetPctEl) targetPctEl.textContent = ((msg.profit_target || 0.10) * 100).toFixed(0) + '%';
+  if (limitPctEl)  limitPctEl.textContent  = ((msg.daily_loss_limit || 0.20) * 100).toFixed(0) + '%';
+
+  // Stop banner
+  const stopBanner = document.getElementById('cg-stop-banner');
+  const stopReason = document.getElementById('cg-stop-reason');
+  if (stopBanner && stopReason) {
+    stopBanner.style.display = msg.stopped ? 'block' : 'none';
+    stopReason.textContent   = msg.stop_reason || '';
+  }
+
+  // Input sync
+  const lossInput   = document.getElementById('cg-loss-limit-input');
+  const targetInput = document.getElementById('cg-target-input');
+  if (lossInput && msg.daily_loss_limit) lossInput.value = Math.round(msg.daily_loss_limit * 100);
+  if (targetInput && msg.profit_target)  targetInput.value = Math.round(msg.profit_target * 100);
+}
+
+function sendCapitalGuardSettings() {
+  const lossInput   = document.getElementById('cg-loss-limit-input');
+  const targetInput = document.getElementById('cg-target-input');
+  send({
+    type:               'settings',
+    loss_limit_pct:     (parseInt(lossInput?.value || 20) / 100),
+    profit_target_pct:  (parseInt(targetInput?.value || 10) / 100),
+  });
 }
 
 // ── AI toggle ─────────────────────────────────────────────────────────────────

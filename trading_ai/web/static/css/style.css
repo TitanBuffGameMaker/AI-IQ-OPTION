@@ -944,3 +944,80 @@ body {
   color: var(--text-muted);
   margin-top: 4px;
 }
+
+/* ── Capital Guard Panel ─────────────────────────────────────── */
+.cg-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text);
+  margin-bottom: 8px;
+}
+.cg-badge {
+  background: rgba(242,54,69,0.2);
+  border: 1px solid var(--red);
+  color: var(--red);
+  border-radius: 12px;
+  padding: 1px 8px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+}
+.cg-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 3px 0;
+  font-size: 11px;
+}
+.cg-label { color: var(--text-muted); }
+.cg-value { font-weight: 700; color: var(--text); }
+.cg-bars  { margin: 8px 0; }
+.cg-bar-label {
+  display: flex;
+  font-size: 10px;
+  color: var(--text-muted);
+  margin-bottom: 3px;
+  gap: 4px;
+}
+.cg-track {
+  position: relative;
+  height: 8px;
+  background: var(--card);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.cg-fill {
+  position: absolute;
+  left: 0; top: 0; bottom: 0;
+  border-radius: 4px;
+  transition: width 0.6s ease;
+}
+.cg-fill.profit { background: var(--green); }
+.cg-fill.loss   { background: var(--red); }
+.cg-target-line {
+  position: absolute;
+  top: 0; bottom: 0;
+  width: 2px;
+  background: rgba(255,255,255,0.3);
+}
+.cg-settings-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 10px;
+  font-size: 11px;
+}
+.cg-input {
+  width: 52px;
+  padding: 3px 6px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 11px;
+  text-align: center;
+}
+.cg-input:focus { outline: none; border-color: var(--red); }

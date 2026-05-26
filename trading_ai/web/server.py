@@ -47,11 +47,12 @@ from trading_ai.utils.logger import setup_logging
 logger = logging.getLogger(__name__)
 
 # ── Lazy imports of heavy modules (only loaded when server starts) ─────────────
-_connector   = None
-_agent       = None
-_brain       = None
-_knowledge   = None
-_env         = None
+_connector    = None
+_agent        = None
+_brain        = None
+_knowledge    = None
+_env          = None
+_capital_guard = None   # CapitalGuard — loaded lazily alongside brain
 _ai_running  = False
 _trade_stats = {"trades": 0, "wins": 0, "pnl": 0.0}
 _trade_history: deque = deque(maxlen=200)
@@ -287,6 +288,8 @@ async def _send_current_state(ws: WebSocket):
             "type": "brain",
             **_brain.get_status(ppo_agent=_agent),
         })
+    if _capital_guard:
+        await manager.send(ws, {"type": "capital_guard", **_capital_guard.status()})
     # Replay buffered log lines so the Logs panel is populated immediately
     if _log_buffer:
         await manager.send(ws, {
@@ -497,11 +500,14 @@ def _apply_settings(msg: Dict):
                     logger.warning("change_balance failed: %s", exc)
             if _brain:
                 _brain.set_account_type(new_account)
+            if _capital_guard:
+                _capital_guard.set_account_type(new_account)
+                broadcast_sync({"type": "capital_guard", **_capital_guard.status()})
             broadcast_sync({
                 "type": "status",
                 "message": f"บัญชี: {new_account}" +
                            (" — โหมดเรียนรู้ (ไม่หยุดเทรด)" if new_account == "PRACTICE"
-                            else " — โหมดจริง (จะหยุดเพื่อรักษายอดเมื่อแพ้)"),
+                            else " — โหมดจริง 🛡️ (Capital Guard เปิดใช้งาน)"),
                 "level": "info",
             })
     if "market_mode" in msg:
@@ -515,10 +521,22 @@ def _apply_settings(msg: Dict):
             broadcast_sync({"type": "status", "message": mode_desc, "level": "info"})
             broadcast_sync({"type": "market_mode", "mode": mode})
 
+    # Capital Guard settings (REAL only)
+    if "loss_limit_pct" in msg and _capital_guard:
+        v = float(msg["loss_limit_pct"])
+        if 0.05 <= v <= 0.50:
+            _capital_guard.DAILY_LOSS_LIMIT_PCT = v
+            broadcast_sync({"type": "capital_guard", **_capital_guard.status()})
+    if "profit_target_pct" in msg and _capital_guard:
+        v = float(msg["profit_target_pct"])
+        if 0.05 <= v <= 0.50:
+            _capital_guard.PROFIT_TARGET_PCT = v
+            broadcast_sync({"type": "capital_guard", **_capital_guard.status()})
+
 
 # ── AI trading loop (runs in background thread) ───────────────────────────────
 def _ai_loop():
-    global _ai_running, _trade_stats, _agent, _brain, _knowledge, _env, _connector
+    global _ai_running, _trade_stats, _agent, _brain, _knowledge, _env, _connector, _capital_guard
 
     if not _agent or not _brain or not _connector:
         broadcast_sync({"type":"status","message":"AI components not loaded","level":"error"})
@@ -543,7 +561,35 @@ def _ai_loop():
 
     obs, _ = _env.reset()
 
+    # ── CapitalGuard init ──────────────────────────────────────────────────
+    if _capital_guard is None:
+        from trading_ai.brain.capital_guard import CapitalGuard
+        _capital_guard = CapitalGuard(account_type=config.IQ_ACCOUNT_TYPE)
+    _capital_guard.set_account_type(config.IQ_ACCOUNT_TYPE)
+    start_balance = _connector.get_balance() or 0.0
+    _capital_guard.update_day_start(start_balance)
+    broadcast_sync({"type": "capital_guard", **_capital_guard.status()})
+
     while _ai_running:
+        # ── CapitalGuard: refresh day-start on midnight, check stop ────────
+        if _capital_guard:
+            bal_now = _connector.get_balance() or start_balance
+            _capital_guard.update_day_start(bal_now)
+            cg_stop, cg_reason = _capital_guard.should_stop()
+            if cg_stop:
+                broadcast_sync({
+                    "type":    "capital_guard",
+                    **_capital_guard.status(),
+                })
+                broadcast_sync({
+                    "type":    "status",
+                    "message": cg_reason,
+                    "level":   "warn",
+                })
+                logger.warning("CapitalGuard STOP: %s", cg_reason)
+                time.sleep(30)   # wait, check again (day may roll over)
+                continue
+
         # ── MULTI-ASSET SCAN ────────────────────────────────────────────────
         # Compute a signal for every resolved OTC asset and pick the best
         # opportunity (highest confidence non-HOLD signal).  Falls back to
@@ -600,15 +646,14 @@ def _ai_loop():
             time.sleep(3)
             continue
 
-        # Dynamic min-confidence: ใหม่ๆ ต้องเริ่มเทรดเพื่อเรียนรู้ → ใช้ 0.30
-        # หลังเทรดครบ 50 ไม้แล้วค่อยขึ้น 0.50
+        # Dynamic min-confidence via CapitalGuard
+        # PRACTICE: 0.30 → 0.40 → 0.50 (เรียนรู้ได้มาก)
+        # REAL:     0.55 → 0.58 → 0.62 → 0.65 (รอสัญญาณมั่นใจเท่านั้น)
         confirmed = _trade_stats.get("trades", 0)
-        if confirmed < 20:
-            min_conf = 0.30
-        elif confirmed < 50:
-            min_conf = 0.40
+        if _capital_guard:
+            min_conf = _capital_guard.min_confidence(confirmed)
         else:
-            min_conf = max(0.50, config.MIN_CONFIDENCE)
+            min_conf = 0.30 if confirmed < 20 else (0.40 if confirmed < 50 else 0.50)
 
         # Pick best non-HOLD signal across all assets
         tradeable = [c for c in candidates
@@ -632,7 +677,17 @@ def _ai_loop():
         action_name   = {0:"HOLD",1:"BUY",2:"SELL"}[final_action]
         obs           = best["obs"]
 
+        # ── Kelly Criterion bet sizing (REAL only) ─────────────────────────
+        trade_amount = config.TRADE_AMOUNT
+        if _capital_guard and final_action != 0:
+            wr_now = _trade_stats["wins"] / max(_trade_stats["trades"], 1)
+            trade_amount = _capital_guard.kelly_amount(config.TRADE_AMOUNT, wr_now)
+            if trade_amount != config.TRADE_AMOUNT:
+                logger.info("Kelly bet: $%.2f (base $%.2f, wr=%.1f%%)",
+                            trade_amount, config.TRADE_AMOUNT, wr_now * 100)
+
         _env.set_asset(api_name)
+        _env._trade_amount = trade_amount   # pass Kelly amount to env
         next_obs, reward, terminated, truncated, info = _env.step(final_action)
 
         if not info.get("skipped", False):
@@ -647,6 +702,11 @@ def _ai_loop():
                 _trade_stats["wins"] += 1
             _trade_stats["pnl"] += pnl
 
+            # ── Capital Guard: record PnL + broadcast status ───────────────
+            if _capital_guard:
+                _capital_guard.record_trade_pnl(pnl)
+                broadcast_sync({"type": "capital_guard", **_capital_guard.status()})
+
             entry = {
                 "time": time.strftime("%H:%M:%S"),
                 "asset": display_name,
@@ -655,6 +715,7 @@ def _ai_loop():
                 "win": pnl > 0,
                 "balance": _connector.get_balance(),
                 "confidence": round(signal.confidence, 3),
+                "amount": round(trade_amount, 2),
             }
             _trade_history.append(entry)
             _save_trade_stats()
@@ -916,6 +977,11 @@ def _init_components():
     _brain     = BrainCore(asset=config.ASSET, base_dir=config.MODEL_DIR,
                            account_type=config.IQ_ACCOUNT_TYPE)
 
+    from trading_ai.brain.capital_guard import CapitalGuard
+    _capital_guard = CapitalGuard(account_type=config.IQ_ACCOUNT_TYPE)
+    init_balance = _connector.get_balance() or 0.0
+    _capital_guard.update_day_start(init_balance)
+
     # Restore cumulative trade history from disk and push to any connected client
     _load_trade_stats()
     broadcast_sync({
@@ -926,6 +992,7 @@ def _init_components():
 
     brain_status = _brain.get_status(ppo_agent=_agent)
     broadcast_sync({"type":"brain", **brain_status})
+    broadcast_sync({"type": "capital_guard", **_capital_guard.status()})
     broadcast_sync({"type":"status","message":"✅ พร้อมแล้ว – กด START AI","level":"success"})
 
     # Fetch initial OTC candle history (30-second candles from IQ Option)

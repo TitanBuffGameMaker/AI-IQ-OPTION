@@ -332,6 +332,71 @@
           ⚠️ AI กำลังพักเพื่อป้องกันการขาดทุน
         </div>
 
+        <!-- ══ Capital Guard Panel (แสดงเฉพาะ REAL account) ══ -->
+        <div id="capital-guard-panel" style="display:none;margin:10px 0 4px;">
+          <div class="cg-header">
+            <span>🛡️ Capital Protection</span>
+            <span class="cg-badge" id="cg-badge">REAL</span>
+          </div>
+
+          <!-- Daily P&L -->
+          <div class="cg-row">
+            <span class="cg-label">P&L วันนี้</span>
+            <span class="cg-value" id="cg-daily-pnl">$0.00</span>
+          </div>
+          <div class="cg-row">
+            <span class="cg-label">Kelly Bet</span>
+            <span class="cg-value" id="cg-kelly-amount">$–</span>
+          </div>
+          <div class="cg-row">
+            <span class="cg-label">Min Confidence</span>
+            <span class="cg-value" id="cg-min-conf">55%</span>
+          </div>
+
+          <!-- Progress bars -->
+          <div class="cg-bars">
+            <!-- Profit target bar (green, fills right) -->
+            <div class="cg-bar-label">
+              <span>กำไร</span>
+              <span id="cg-profit-pct-text">0%</span>
+              <span style="margin-left:auto;color:var(--green);font-size:10px;">เป้า <span id="cg-target-pct">10%</span></span>
+            </div>
+            <div class="cg-track">
+              <div class="cg-fill profit" id="cg-profit-bar" style="width:0%"></div>
+              <div class="cg-target-line" id="cg-target-line"></div>
+            </div>
+
+            <!-- Loss limit bar (red, fills right) -->
+            <div class="cg-bar-label" style="margin-top:6px;">
+              <span>ขาดทุน</span>
+              <span id="cg-loss-pct-text">0%</span>
+              <span style="margin-left:auto;color:var(--red);font-size:10px;">ขีดจำกัด <span id="cg-limit-pct">20%</span></span>
+            </div>
+            <div class="cg-track">
+              <div class="cg-fill loss" id="cg-loss-bar" style="width:0%"></div>
+            </div>
+          </div>
+
+          <!-- Stop banner -->
+          <div id="cg-stop-banner" style="display:none;margin-top:8px;padding:8px 12px;
+               border-radius:8px;font-size:11px;font-weight:600;text-align:center;
+               background:rgba(242,54,69,0.2);border:1px solid var(--red);color:var(--red);">
+            <span id="cg-stop-reason">–</span>
+          </div>
+
+          <!-- Settings row -->
+          <div class="cg-settings-row">
+            <label class="cg-label">Loss Limit %</label>
+            <input type="number" id="cg-loss-limit-input" class="cg-input"
+                   min="5" max="50" step="1" value="20"
+                   onchange="sendCapitalGuardSettings()">
+            <label class="cg-label" style="margin-left:10px;">Target %</label>
+            <input type="number" id="cg-target-input" class="cg-input"
+                   min="5" max="50" step="1" value="10"
+                   onchange="sendCapitalGuardSettings()">
+          </div>
+        </div>
+
         <!-- ── Raw Stats ── -->
         <div class="brain-stat">
           <span class="brain-stat-label">Knowledge nodes (รากไม้)</span>
