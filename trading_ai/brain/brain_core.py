@@ -37,6 +37,7 @@ from trading_ai.brain.graduation import GraduationSystem
 from trading_ai.brain.neuro import CLSMemory, DopamineSystem, FearSystem, SleepCycle
 from trading_ai.brain.nas import NASEngine
 from trading_ai.brain.nas.nas_engine import NASConfig
+from trading_ai.models.per_buffer import PrioritizedReplayBuffer
 from trading_ai.brain.working_memory import WorkingMemory
 from trading_ai.brain.strategy_library import StrategyLibrary
 from trading_ai.brain.self_reflection import SelfReflectionEngine
@@ -139,6 +140,13 @@ class BrainCore:
             n_actions=3,
             champion_config=NASConfig(hidden_size=384, lstm_hidden=128, dropout=0.10),
         )
+
+        # ── Prioritized Experience Replay ────────────────────────────────────
+        self.per_buffer = PrioritizedReplayBuffer(capacity=2000, obs_size=OBS_SIZE)
+
+        # ── Adaptive Confidence — AI ปรับ threshold ตามผลงานตัวเอง ─────────
+        self._perf_window: list = []   # rolling 30-trade win/loss
+        self._conf_multiplier: float = 1.0   # 0.80–1.15
 
         # ── State tracking ──────────────────────────────────────────────────
         self._last_strategy_name: str = "Unknown"
@@ -276,8 +284,29 @@ class BrainCore:
                 if signal.action == 2:
                     signal.confidence = min(0.95, signal.confidence + seq_conf * 0.05)
 
+        # ── CLS recall — neocortical wisdom (now actually used) ─────────────
+        cls_recall = self.cls_memory.recall(
+            indicator_vec[:40] if len(indicator_vec) >= 40 else indicator_vec
+        )
+        if cls_recall.get("has_memory") and signal.action != 0:
+            cls_wr = cls_recall["combined_win_rate"]
+            if cls_wr > 0.62:
+                signal.confidence = min(0.95, signal.confidence + 0.04)
+                signal.reasoning.append(
+                    f"CLS neocortex: {cls_wr:.0%} win rate ใน context นี้"
+                )
+            elif cls_wr < 0.38:
+                signal.confidence = max(0.0, signal.confidence - 0.04)
+                signal.reasoning.append(
+                    f"CLS neocortex: {cls_wr:.0%} — context นี้เสี่ยง"
+                )
+
+        # ── Adaptive confidence multiplier ───────────────────────────────────
+        signal.confidence = round(
+            float(np.clip(signal.confidence * self._conf_multiplier, 0.0, 0.95)), 4
+        )
+
         # ── Record this cycle's signal strength for recovery tracking ───────
-        # (no-op on PRACTICE; on REAL it counts toward resume-readiness)
         self.working_memory.record_observation(signal.confidence)
 
         # ── Should-pause override (REAL accounts only) ──────────────────────
@@ -411,6 +440,32 @@ class BrainCore:
                     pnl=pnl,
                     next_obs=next_obs,
                 )
+
+        # ── Prioritized Replay Buffer — store for future resampling ─────────
+        if self._last_indicator_vec is not None and next_obs is not None:
+            try:
+                self.per_buffer.add(
+                    obs=self._last_indicator_vec.astype(np.float32),
+                    next_obs=next_obs.astype(np.float32),
+                    action=action_taken,
+                    reward=float(pnl),
+                    rpe_mult=rpe_mult,
+                )
+            except Exception:
+                pass
+
+        # ── Adaptive Confidence: adjust multiplier based on rolling win rate ─
+        self._perf_window.append(pnl > 0)
+        if len(self._perf_window) > 30:
+            self._perf_window = self._perf_window[-30:]
+        if len(self._perf_window) >= 20:
+            recent_wr = sum(self._perf_window) / len(self._perf_window)
+            if recent_wr < 0.42:
+                self._conf_multiplier = max(0.80, self._conf_multiplier - 0.01)
+            elif recent_wr > 0.60:
+                self._conf_multiplier = min(1.15, self._conf_multiplier + 0.005)
+            else:
+                self._conf_multiplier += (1.0 - self._conf_multiplier) * 0.05
 
         # ── Neuroscience modules ─────────────────────────────────────────────
         # CLS hippocampus: encode this episode fast
@@ -570,6 +625,9 @@ class BrainCore:
             "graduation":               self.graduation.evaluate(self),
             # NAS
             "nas":                      self.nas.stats(),
+            # PER + Adaptive conf
+            "per_buffer":               self.per_buffer.stats(),
+            "conf_multiplier":          round(self._conf_multiplier, 3),
         }
 
     def shutdown(self):

@@ -1727,6 +1727,18 @@ def _ai_loop():
             time.sleep(3)
             continue
 
+        # ── Fear System: block trades during REAL-mode cooldown ─────────────
+        if _brain:
+            in_cooldown, fear_reason, remaining_min = _brain.fear_system.should_cooldown()
+            if in_cooldown:
+                broadcast_sync({
+                    "type": "status",
+                    "message": f"⏸️ {fear_reason} ({remaining_min:.0f} นาทีที่เหลือ)",
+                    "level": "warn",
+                })
+                time.sleep(10)
+                continue
+
         # Dynamic min-confidence via CapitalGuard
         # PRACTICE: 0.30 → 0.40 → 0.50 (เรียนรู้ได้มาก)
         # REAL:     0.55 → 0.58 → 0.62 → 0.65 (รอสัญญาณมั่นใจเท่านั้น)
@@ -1735,6 +1747,12 @@ def _ai_loop():
             min_conf = _capital_guard.min_confidence(confirmed)
         else:
             min_conf = 0.30 if confirmed < 20 else (0.40 if confirmed < 50 else 0.50)
+
+        # Apply fear's extra confidence requirement (REAL mode only)
+        if _brain:
+            fear_boost = _brain.fear_system.get_confidence_threshold_boost() / 100.0
+            if fear_boost > 0:
+                min_conf = min(0.92, min_conf + fear_boost)
 
         # Pick best non-HOLD signal across all assets
         tradeable = [c for c in candidates
