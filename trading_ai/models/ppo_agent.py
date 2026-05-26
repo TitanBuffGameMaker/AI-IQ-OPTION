@@ -539,6 +539,56 @@ class PPOAgent:
         }, path)
         logger.info("Knowledge saved → %s  (steps=%d)", path, self.total_steps)
 
+    # ── Distributed Worker Support ────────────────────────────────────────────
+
+    def get_weights_bytes(self) -> bytes:
+        """Serialize network weights for sending to worker machines."""
+        import io
+        buf = io.BytesIO()
+        torch.save(self.network.state_dict(), buf)
+        return buf.getvalue()
+
+    def load_weights_bytes(self, data: bytes) -> None:
+        """Load network weights received from a worker machine."""
+        import io
+        buf = io.BytesIO(data)
+        state = torch.load(buf, map_location=self.device, weights_only=True)
+        self.network.load_state_dict(state)
+
+    def fedavg_merge(self, worker_weights_bytes: bytes, alpha: float = 0.25) -> None:
+        """
+        Federated averaging: blend worker-trained weights into this model.
+        alpha=0.25 = 25% worker influence (conservative, preserves server knowledge).
+        """
+        import io
+        buf = io.BytesIO(worker_weights_bytes)
+        worker_state = torch.load(buf, map_location=self.device, weights_only=True)
+        own_state = self.network.state_dict()
+        merged = {
+            k: (1.0 - alpha) * own_state[k].float() + alpha * worker_state[k].float()
+            if k in worker_state else own_state[k]
+            for k in own_state
+        }
+        self.network.load_state_dict(merged)
+        logger.info("FedAvg applied — worker alpha=%.2f", alpha)
+
+    def get_buffer_bytes(self) -> bytes:
+        """Serialize the rollout buffer for sending to workers."""
+        import io, pickle
+        data = {
+            "obs":       self.buffer.obs.numpy(),
+            "next_obs":  self.buffer.next_obs.numpy(),
+            "actions":   self.buffer.actions.numpy(),
+            "log_probs": self.buffer.log_probs.numpy(),
+            "rewards":   self.buffer.rewards.numpy(),
+            "values":    self.buffer.values.numpy(),
+            "dones":     self.buffer.dones.numpy(),
+            "size":      self.buffer.size,
+        }
+        buf = io.BytesIO()
+        pickle.dump(data, buf)
+        return buf.getvalue()
+
     def load(self, path: str) -> bool:
         if not os.path.exists(path):
             logger.info("No checkpoint at %s – starting fresh", path)

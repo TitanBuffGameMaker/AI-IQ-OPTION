@@ -66,6 +66,11 @@ _otp_event      = threading.Event()
 _otp_code:  str = ""
 _pending_creds: Dict[str, str] = {}   # {"email":..,"password":..} from UI login form
 
+# ── Distributed Workers ────────────────────────────────────────────────────────
+_worker_sockets: Dict[str, "WebSocket"] = {}   # worker_id → WebSocket
+_worker_results: Dict[str, bytes] = {}          # worker_id → weights_bytes (pending FedAvg)
+_worker_lock    = threading.Lock()              # guards _worker_results dict
+
 # ── Live-log broadcast ─────────────────────────────────────────────────────────
 _log_buffer: deque = deque(maxlen=300)   # last 300 log lines for new-client catch-up
 _log_broadcasting = False                # re-entrancy guard for the WS handler
@@ -1312,6 +1317,72 @@ async def websocket_endpoint(ws: WebSocket):
         manager.disconnect(ws)
 
 
+@app.websocket("/ws/worker")
+async def worker_endpoint(ws: WebSocket):
+    """Worker machines connect here to receive training tasks and return results."""
+    import base64
+    await ws.accept()
+    worker_id = str(id(ws))[-8:]
+    worker_name = "Worker"
+    _worker_sockets[worker_id] = ws
+    logger.info("Worker %s connected (total=%d)", worker_id, len(_worker_sockets))
+    broadcast_sync({
+        "type": "status",
+        "message": f"⚙️ Worker เครื่องใหม่เชื่อมต่อแล้ว (รวม {len(_worker_sockets)} เครื่อง)",
+        "level": "success",
+    })
+    broadcast_sync({"type": "workers", "count": len(_worker_sockets)})
+    try:
+        while True:
+            raw = await ws.receive_text()
+            msg = json.loads(raw)
+            mtype = msg.get("type")
+
+            if mtype == "hello":
+                worker_name = msg.get("name", f"Worker-{worker_id}")
+                await ws.send_text(json.dumps({
+                    "type": "welcome",
+                    "worker_id": worker_id,
+                    "message": f"เชื่อมต่อสำเร็จ! ยินดีต้อนรับ {worker_name}",
+                }))
+                logger.info("Worker %s identified as '%s'", worker_id, worker_name)
+
+            elif mtype == "work_result":
+                # Worker finished training — store weights for FedAvg
+                weights_b64 = msg.get("weights", "")
+                metrics     = msg.get("metrics", {})
+                if weights_b64:
+                    weights_bytes = base64.b64decode(weights_b64)
+                    with _worker_lock:
+                        _worker_results[worker_id] = weights_bytes
+                    logger.info(
+                        "Worker %s returned weights | ploss=%.4f vloss=%.4f",
+                        worker_id, metrics.get("policy_loss", 0), metrics.get("value_loss", 0),
+                    )
+                    broadcast_sync({
+                        "type":    "status",
+                        "message": f"⚙️ {worker_name}: ส่งผล training กลับแล้ว "
+                                   f"(policy_loss={metrics.get('policy_loss',0):.4f})",
+                        "level":   "info",
+                    })
+
+    except WebSocketDisconnect:
+        pass
+    except Exception as exc:
+        logger.error("Worker %s error: %s", worker_id, exc)
+    finally:
+        _worker_sockets.pop(worker_id, None)
+        with _worker_lock:
+            _worker_results.pop(worker_id, None)
+        logger.info("Worker %s disconnected (remaining=%d)", worker_id, len(_worker_sockets))
+        broadcast_sync({
+            "type": "status",
+            "message": f"⚙️ Worker ออกจากระบบ (เหลือ {len(_worker_sockets)} เครื่อง)",
+            "level": "warn",
+        })
+        broadcast_sync({"type": "workers", "count": len(_worker_sockets)})
+
+
 async def _send_current_state(ws: WebSocket):
     """Push current system state to a newly connected client."""
     bal = _connector.get_balance() if _connector else 0.0
@@ -1620,6 +1691,52 @@ def _apply_settings(msg: Dict):
             broadcast_sync({"type": "capital_guard", **_capital_guard.status()})
 
 
+# ── Distributed Worker helpers ───────────────────────────────────────────────
+
+def _dispatch_to_workers(agent) -> None:
+    """
+    Send the current buffer + model weights to all connected workers.
+    Workers will run PPO training and return updated weights via /ws/worker.
+    Called from _ai_loop() (background thread) when buffer is ready.
+    """
+    import base64
+    if not _worker_sockets:
+        return
+    try:
+        weights_b64  = base64.b64encode(agent.get_weights_bytes()).decode()
+        buffer_b64   = base64.b64encode(agent.get_buffer_bytes()).decode()
+        n_workers    = len(_worker_sockets)
+        logger.info("Dispatching training task to %d worker(s)…", n_workers)
+        for wid, ws in list(_worker_sockets.items()):
+            payload = json.dumps({
+                "type":       "work_request",
+                "weights":    weights_b64,
+                "buffer":     buffer_b64,
+                "worker_id":  wid,
+                "hypers": {
+                    "obs_size":      agent.obs_size,
+                    "n_actions":     agent.n_actions,
+                    "hidden_size":   agent.hidden_size,
+                    "ppo_epochs":    config.PPO_EPOCHS,
+                    "batch_size":    config.BATCH_SIZE,
+                    "clip_epsilon":  config.CLIP_EPSILON,
+                    "gamma":         config.GAMMA,
+                    "gae_lambda":    config.GAE_LAMBDA,
+                    "lr":            config.LEARNING_RATE,
+                },
+            })
+            try:
+                loop = asyncio.get_event_loop()
+                future = asyncio.run_coroutine_threadsafe(
+                    ws.send_text(payload), loop
+                )
+                future.result(timeout=5)
+            except Exception as exc:
+                logger.warning("Could not dispatch to worker %s: %s", wid, exc)
+    except Exception as exc:
+        logger.error("Worker dispatch error: %s", exc)
+
+
 # ── AI trading loop (runs in background thread) ───────────────────────────────
 def _ai_loop():
     global _ai_running, _trade_stats, _agent, _brain, _knowledge, _env, _connector, _capital_guard
@@ -1884,7 +2001,27 @@ def _ai_loop():
                      terminated or truncated)
 
         if _agent.ready_to_update():
+            # Dispatch to workers BEFORE local update (workers get same buffer)
+            if _worker_sockets:
+                _dispatch_to_workers(_agent)
+
             metrics = _agent.update(next_obs)
+
+            # Apply any pending FedAvg results from workers
+            with _worker_lock:
+                pending = dict(_worker_results)
+                _worker_results.clear()
+            for wid, weights_bytes in pending.items():
+                try:
+                    _agent.fedavg_merge(weights_bytes, alpha=0.25)
+                    broadcast_sync({
+                        "type": "status",
+                        "message": f"🔀 FedAvg: รวม knowledge จาก Worker {wid} แล้ว",
+                        "level": "info",
+                    })
+                except Exception as _fa_exc:
+                    logger.error("FedAvg failed for worker %s: %s", wid, _fa_exc)
+
             _knowledge.save_brain(_agent)
             brain_status = _brain.get_status(ppo_agent=_agent)
             broadcast_sync({"type": "brain", **brain_status})
@@ -1896,6 +2033,7 @@ def _ai_loop():
                 "lr":          round(metrics.get("lr", 0), 6),
                 "updates":     _agent.total_updates,
                 "steps":       _agent.total_steps,
+                "workers":     len(_worker_sockets),
             })
 
         obs = next_obs
