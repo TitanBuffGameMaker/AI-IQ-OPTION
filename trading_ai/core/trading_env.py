@@ -22,7 +22,7 @@ from gymnasium import spaces
 from trading_ai.config import config
 from trading_ai.core.iq_connector import IQOptionConnector
 from trading_ai.indicators.technical import IndicatorEngine, N_FEATURES
-from trading_ai.utils.chart_capture import ChartCapture
+from trading_ai.utils.price_encoder import PriceSequenceEncoder
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +47,7 @@ class TradingEnv(gym.Env):
         super().__init__()
         self.connector       = connector
         self.indicator_engine = IndicatorEngine()
-        self.chart_capture   = ChartCapture(img_size=config.CHART_IMG_SIZE)
+        self.price_encoder   = PriceSequenceEncoder()
 
         self.action_space = spaces.Discrete(3)
         self.observation_space = spaces.Box(
@@ -244,7 +244,7 @@ class TradingEnv(gym.Env):
             ind_vec = np.zeros(N_INDICATORS, dtype=np.float32)
         ind_vec = ind_vec[:N_INDICATORS]
 
-        chart_vec = self.chart_capture.get_features()
+        chart_vec = self.price_encoder.encode(df)
         if chart_vec is None or len(chart_vec) != N_CHART_FEATURES:
             chart_vec = np.zeros(N_CHART_FEATURES, dtype=np.float32)
 

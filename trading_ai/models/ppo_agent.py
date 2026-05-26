@@ -23,6 +23,7 @@ import torch.optim as optim
 from torch.distributions import Categorical
 
 from trading_ai.config import config
+from trading_ai.models.tft_encoder import ActorCriticV2
 
 logger = logging.getLogger(__name__)
 
@@ -304,6 +305,12 @@ class RolloutBuffer:
         for start in range(0, self.size, batch_size):
             yield indices[start: start + batch_size]
 
+    def get_sequential_batches(self, batch_size: int):
+        """Yield indices in chronological order (required for LSTM/Transformer training)."""
+        indices = torch.arange(self.size)
+        for start in range(0, self.size, batch_size):
+            yield indices[start: start + batch_size]
+
     def reset(self):
         self.ptr  = 0
         self.full = False
@@ -325,14 +332,22 @@ class PPOAgent:
     ENTROPY_END   = 0.003
     ENTROPY_DECAY = 50_000
 
-    def __init__(self, obs_size: int, n_actions: int = 3, hidden_size: int = 384):
+    def __init__(self, obs_size: int, n_actions: int = 3, hidden_size: int = 384,
+                 use_v2: Optional[bool] = None):
         self.obs_size    = obs_size
         self.n_actions   = n_actions
         self.hidden_size = hidden_size
         self.device      = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        logger.info("PPO ULTRA agent — device: %s | hidden: %d", self.device, hidden_size)
 
-        self.network   = ActorCritic(obs_size, n_actions, hidden_size=hidden_size).to(self.device)
+        # use_v2=None means "read from config"; explicit bool overrides
+        self._use_v2 = config.USE_V2 if use_v2 is None else use_v2
+
+        if self._use_v2:
+            logger.info("PPO V2 (Semi-Pro TFT+MoE) — device: %s", self.device)
+            self.network = ActorCriticV2(obs_size, n_actions, hidden_size=256).to(self.device)
+        else:
+            logger.info("PPO ULTRA agent — device: %s | hidden: %d", self.device, hidden_size)
+            self.network = ActorCritic(obs_size, n_actions, hidden_size=hidden_size).to(self.device)
         self.optimizer = optim.Adam(
             self.network.parameters(),
             lr=config.LEARNING_RATE,
@@ -403,7 +418,10 @@ class PPOAgent:
             _, last_value = self.network(obs_t)
             last_value = last_value.squeeze().item()
         self.network.train()
-        self.network.reset_hidden()
+        if self._use_v2:
+            self.network.reset_context()
+        else:
+            self.network.reset_hidden()
 
         returns, advantages = self.buffer.compute_returns_and_advantages(
             last_value, config.GAMMA, config.GAE_LAMBDA
@@ -423,10 +441,10 @@ class PPOAgent:
         n_upd = 0
 
         for _ in range(config.PPO_EPOCHS):
-            # Reset LSTM state once per epoch, then let it accumulate across
-            # sequential batches so temporal patterns are preserved during training.
-            self.network.reset_hidden()
-            for idx in self.buffer.get_batches(config.BATCH_SIZE):
+            self.network.reset_context() if self._use_v2 else self.network.reset_hidden()
+            batch_iter = (self.buffer.get_sequential_batches(config.BATCH_SIZE)
+                          if self._use_v2 else self.buffer.get_batches(config.BATCH_SIZE))
+            for idx in batch_iter:
                 obs_b      = all_obs[idx]
                 nxt_b      = all_next_obs[idx]
                 act_b      = all_actions[idx]
@@ -490,7 +508,10 @@ class PPOAgent:
         metrics["entropy_coef"] = ent_coef
 
         self.buffer.reset()
-        self.network.reset_hidden()
+        if self._use_v2:
+            self.network.reset_context()
+        else:
+            self.network.reset_hidden()
         self.total_updates += 1
 
         logger.info(
