@@ -13,6 +13,7 @@ Persisted as a JSON file so the brain survives across sessions.
 import json
 import logging
 import os
+import threading
 from collections import defaultdict
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
@@ -44,6 +45,7 @@ class KnowledgeGraph:
         self._tag_index: Dict[str, List[str]] = defaultdict(list)   # tag → [node_ids]
         self._type_index: Dict[str, List[str]] = defaultdict(list)  # type → [node_ids]
         self._asset_index: Dict[str, List[str]] = defaultdict(list) # asset → [node_ids]
+        self._lock = threading.RLock()  # protect concurrent writes from worker + brain threads
 
         self.load()
         self._seed_root_knowledge()
@@ -54,28 +56,27 @@ class KnowledgeGraph:
         """
         Plant a new knowledge node (or reinforce an existing one if duplicate).
         Returns the node_id that was stored.
+        Thread-safe: uses RLock so server brain thread and worker WebSocket
+        handler can both call this concurrently without data corruption.
         """
-        # Check for near-duplicate by concept similarity
-        existing = self._find_similar(node.concept, node.node_type, node.asset)
-        if existing:
-            existing.confirm(0.06)
-            # Merge tags
-            for tag in node.tags:
-                if tag not in existing.tags:
-                    existing.tags.append(tag)
-            logger.debug("Reinforced existing node: %s", existing)
+        with self._lock:
+            existing = self._find_similar(node.concept, node.node_type, node.asset)
+            if existing:
+                existing.confirm(0.06)
+                for tag in node.tags:
+                    if tag not in existing.tags:
+                        existing.tags.append(tag)
+                logger.debug("Reinforced existing node: %s", existing)
+                self._save_incremental()
+                return existing.node_id
+
+            self._nodes[node.node_id] = node
+            self._index_node(node)
+            self._auto_connect(node)
+
+            logger.debug("New knowledge node planted: %s", node)
             self._save_incremental()
-            return existing.node_id
-
-        self._nodes[node.node_id] = node
-        self._index_node(node)
-
-        # Auto-connect to related nodes (roots intertwine)
-        self._auto_connect(node)
-
-        logger.debug("New knowledge node planted: %s", node)
-        self._save_incremental()
-        return node.node_id
+            return node.node_id
 
     def reinforce(self, node_id: str, strength: float = 0.08):
         """A trade result or internet source confirms this node."""

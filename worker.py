@@ -50,28 +50,46 @@ RESEARCH_TOPICS = {
         "Stochastic oscillator overbought oversold", "Fibonacci retracement levels forex",
         "support resistance trading strategy", "moving average crossover strategy",
         "ADX trend strength indicator", "Parabolic SAR trading signals",
+        "Williams percent range oscillator", "commodity channel index CCI trading",
+        "average true range ATR volatility", "volume weighted average price VWAP",
     ],
     "binary_options": [
         "binary options 1 minute strategy", "binary options OTC weekend trading",
         "binary options entry timing technique", "binary options money management rules",
         "binary options technical analysis tips", "binary options trend following strategy",
+        "binary options reversal trading method", "binary options 60 second scalping",
+        "binary options payout percentage strategy",
     ],
     "price_action": [
         "bullish engulfing candlestick pattern", "pin bar reversal trading strategy",
         "doji candlestick meaning interpretation", "hammer hanging man pattern",
         "morning star evening star reversal", "head and shoulders chart pattern",
         "double top double bottom reversal", "triangle pattern breakout trading",
-        "flag pennant continuation pattern",
+        "flag pennant continuation pattern", "inside bar breakout strategy",
+        "three white soldiers three black crows", "shooting star bearish reversal pattern",
     ],
     "risk_management": [
         "forex risk management rules", "position sizing Kelly criterion trading",
         "stop loss strategy binary options", "risk reward ratio forex trading",
         "drawdown recovery trading strategy", "trading capital preservation rules",
+        "martingale anti-martingale binary options", "consecutive loss recovery strategy",
     ],
     "trading_psychology": [
         "trader psychology fear greed discipline", "revenge trading avoidance",
         "patience in forex trading", "trading journal benefits review",
         "emotional control day trading", "overconfidence bias trading mistakes",
+        "loss aversion prospect theory trading", "confirmation bias market analysis",
+    ],
+    "market_analysis": [
+        "trend following vs mean reversion strategy", "market volatility trading strategy",
+        "breakout trading false breakout filter", "multi timeframe analysis forex",
+        "market regime detection trending ranging", "momentum trading strategy forex",
+        "swing high swing low market structure", "supply demand zone trading",
+    ],
+    "forex_fundamentals": [
+        "forex currency correlation trading", "USD index DXY forex impact",
+        "interest rate forex trading impact", "economic calendar forex news trading",
+        "EUR USD major pair analysis", "forex session overlap volatility",
     ],
 }
 
@@ -80,12 +98,21 @@ WIKI_TITLE_MAP = {
     "hammer": "Hammer_(candlestick_pattern)",
     "morning star": "Morning_star_(candlestick_pattern)",
     "evening star": "Morning_star_(candlestick_pattern)",
+    "three white": "Three_white_soldiers",
+    "three black": "Three_black_crows",
+    "shooting star": "Shooting_star_(candlestick_pattern)",
     "head and shoulders": "Head_and_shoulders_(chart_pattern)",
     "double top": "Double_top_and_double_bottom",
     "double bottom": "Double_top_and_double_bottom",
     "triangle": "Triangle_(chart_pattern)",
+    "flag": "Flag_(chart_pattern)",
     "pin bar": "Price_action_trading",
+    "inside bar": "Price_action_trading",
     "candlestick": "Candlestick_pattern",
+    "williams": "Williams_%25R",
+    "cci": "Commodity_channel_index",
+    "atr": "Average_true_range",
+    "vwap": "Volume-weighted_average_price",
     "rsi": "Relative_strength_index", "macd": "MACD",
     "bollinger": "Bollinger_Bands",
     "ichimoku": "Ichimoku_Kink%C5%8D_Hy%C5%8D",
@@ -95,11 +122,22 @@ WIKI_TITLE_MAP = {
     "parabolic sar": "Parabolic_SAR",
     "moving average": "Moving_average",
     "support resistance": "Support_and_resistance",
-    "kelly": "Kelly_criterion", "risk management": "Risk_management",
+    "momentum": "Momentum_(finance)",
+    "volatility": "Volatility_(finance)",
+    "breakout": "Breakout_(finance)",
+    "carry trade": "Carry_(investment)",
+    "supply demand": "Supply_and_demand",
+    "correlation": "Currency_pair",
+    "interest rate": "Interest_rate",
+    "kelly": "Kelly_criterion",
+    "martingale": "Martingale_(probability_theory)",
+    "risk management": "Risk_management",
     "drawdown": "Drawdown_(economics)",
     "binary option": "Binary_option", "trend": "Market_trend",
     "price action": "Price_action_trading",
     "trader psychology": "Behavioral_economics",
+    "loss aversion": "Loss_aversion",
+    "confirmation bias": "Confirmation_bias",
     "overconfidence": "Overconfidence_effect",
 }
 
@@ -109,6 +147,8 @@ CATEGORY_NODE_TYPE = {
     "price_action":       "pattern",
     "risk_management":    "risk_concept",
     "trading_psychology": "psychology",
+    "market_analysis":    "technique",
+    "forex_fundamentals": "strategy_concept",
 }
 
 WIKIPEDIA_API   = "https://en.wikipedia.org/api/rest_v1/page/summary/{title}"
@@ -123,6 +163,7 @@ class WorkerResearcher:
         self._category_idx   = random.randint(0, len(RESEARCH_TOPICS) - 1)
         self._categories     = list(RESEARCH_TOPICS.keys())
         self._last_research  = 0.0
+        self._wiki_fetched: dict = {}  # topic → timestamp; skip Wikipedia if fetched < 1h ago
         try:
             import requests
             self._session = requests.Session()
@@ -151,10 +192,15 @@ class WorkerResearcher:
 
         logger.info("🔍 Research: category=%s topics=%s", category, chosen)
 
+        now = time.time()
         for topic in chosen:
-            node = self._wikipedia(topic, category, node_type)
-            if node:
-                nodes.append(node)
+            # Wikipedia: skip if fetched within last hour (content doesn't change)
+            if now - self._wiki_fetched.get(topic, 0) >= 3600:
+                node = self._wikipedia(topic, category, node_type)
+                if node:
+                    nodes.append(node)
+                    self._wiki_fetched[topic] = now
+            # Google News: always fetch (headlines change continuously)
             news = self._google_news_nodes(topic, category, node_type)
             nodes.extend(news[:3])
             if len(nodes) >= 20:
