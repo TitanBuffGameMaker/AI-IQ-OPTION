@@ -509,8 +509,8 @@ class BrainReasoner:
                 sell += max(0, -sentiment) * 0.3
 
             if high_impact:
-                hold   += 0.5
-                reason += " | High-impact news!"
+                hold   += 1.5   # strong hold signal — overrides weak directional signals
+                reason += " | High-impact news! (avoid trading)"
         except Exception:
             pass
         return buy, sell, hold, reason

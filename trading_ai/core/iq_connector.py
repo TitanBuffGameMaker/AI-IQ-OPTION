@@ -18,6 +18,17 @@ _last_connect_time: float = 0.0
 _MIN_CONNECT_INTERVAL = 10.0   # วินาที — ห้าม connect ถี่กว่านี้
 _RATE_LIMIT_WAIT     = 310.0   # วินาที — รอ 5 นาที + buffer เมื่อถูก rate limit
 
+# ── WS shared-buffer race-condition guard ─────────────────────────────────────
+# iqoptionapi uses a single global candle buffer.  Two concurrent get_candles()
+# calls (from _price_loop + _ai_loop) routinely return data for the wrong asset.
+# Serialise every call behind this lock and add a post-request settle delay.
+_candle_lock = threading.Lock()
+_CANDLE_SETTLE_SECS = 0.7   # time to let iqoptionapi's WS buffer clear after each call
+
+# IQ Option sometimes returns OTC assets under plain Forex names (e.g. "AUDUSD"
+# instead of "AUDUSD-OTC").  These are still OTC instruments and always open.
+_ALWAYS_OPEN_NAMES = {"AUDUSD", "EURUSD", "GBPUSD", "EURJPY", "USDCAD", "USDCHF"}
+
 
 # ── Silence iqoptionapi internal noise ────────────────────────────────────────
 # iqoptionapi 7.x raises KeyError('underlying') from __get_digital_open whenever
@@ -237,17 +248,21 @@ class IQOptionConnector:
     def get_candles(self, asset: str, timeframe_seconds: int, count: int) -> Optional[pd.DataFrame]:
         if not self.ensure_connected():
             return None
-        try:
-            candles = self.api.get_candles(asset, timeframe_seconds, count, time.time())
-            if not candles:
+        with _candle_lock:
+            try:
+                candles = self.api.get_candles(asset, timeframe_seconds, count, time.time())
+                # Settle time: let the WS buffer clear before the next caller
+                # acquires the lock and issues a request for a different asset.
+                time.sleep(_CANDLE_SETTLE_SECS)
+                if not candles:
+                    return None
+                df = pd.DataFrame(candles)
+                df = df.rename(columns={"max": "high", "min": "low"})
+                df = df[["open", "high", "low", "close", "volume"]].astype(float)
+                return df.reset_index(drop=True)
+            except Exception as exc:
+                logger.error("get_candles error: %s", exc)
                 return None
-            df = pd.DataFrame(candles)
-            df = df.rename(columns={"max": "high", "min": "low"})
-            df = df[["open", "high", "low", "close", "volume"]].astype(float)
-            return df.reset_index(drop=True)
-        except Exception as exc:
-            logger.error("get_candles error: %s", exc)
-            return None
 
     def get_balance(self) -> float:
         if not self.ensure_connected():
@@ -371,6 +386,8 @@ class IQOptionConnector:
         """
         if "OTC" in asset.upper():
             return True
+        if asset in _ALWAYS_OPEN_NAMES:
+            return True   # resolved under plain Forex name but still an OTC instrument
         if not self.ensure_connected():
             return False
         try:

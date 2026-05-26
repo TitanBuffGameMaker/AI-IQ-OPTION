@@ -548,9 +548,9 @@ def _ai_loop():
             except Exception as exc:
                 logger.debug("Observation failed for %s: %s", display_name, exc)
                 continue
-            # Let the WS buffer flush before the next asset (shared-state race
-            # with the _price_loop thread) — 1.5s matches the resolve loop.
-            time.sleep(1.5)
+            # The WS lock inside get_candles() already serialises requests.
+            # A short yield here lets the event loop breathe between assets.
+            time.sleep(0.1)
             indicator_vec = asset_obs[:N_INDICATORS]
             ppo_action, log_prob, value = _agent.select_action(asset_obs)
             _, ppo_conf = _agent.get_confidence(asset_obs)
@@ -749,8 +749,9 @@ def _resolve_asset_name(display_name: str) -> Optional[str]:
 
     iqoptionapi uses a shared WebSocket buffer for candle data.  Calling
     get_candles() for multiple assets in rapid succession can return stale
-    data from the previous request.  We guard against this by:
-      1. Sleeping 1.5 s after each request so the WS response settles.
+    data from the previous request.  We guard against this via:
+      1. A global _candle_lock in IQOptionConnector.get_candles() — only one
+         call is in-flight at any time, plus a settle delay inside the lock.
       2. Validating the returned price against known sane ranges.
     """
     if display_name in _resolved_asset_names:
@@ -762,7 +763,6 @@ def _resolve_asset_name(display_name: str) -> Optional[str]:
         try:
             with _suppress_iqapi_stdout():
                 df = _connector.get_candles(asset=api_name, timeframe_seconds=60, count=5)
-            time.sleep(1.5)   # let WS buffer flush before next request
             if df is None or len(df) == 0:
                 continue
             price = float(df["close"].iloc[-1])
@@ -787,7 +787,6 @@ def _fetch_initial_candles():
             continue
         try:
             df = _connector.get_candles(asset=api_name, timeframe_seconds=30, count=100)
-            time.sleep(1.5)   # let WS buffer flush before next asset
             if df is None or len(df) == 0:
                 continue
             candles = []
@@ -960,7 +959,6 @@ def _price_loop():
                 df = _connector.get_candles(
                     asset=api_name, timeframe_seconds=30, count=5
                 )
-                time.sleep(1.2)   # wait for WS buffer to flush before next asset
                 if df is None or len(df) < 2:
                     continue
 
