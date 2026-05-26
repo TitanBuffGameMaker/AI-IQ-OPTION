@@ -25,9 +25,9 @@ _RATE_LIMIT_WAIT     = 310.0   # วินาที — รอ 5 นาที + 
 _candle_lock = threading.Lock()
 _CANDLE_SETTLE_SECS = 0.7   # time to let iqoptionapi's WS buffer clear after each call
 
-# IQ Option sometimes returns OTC assets under plain Forex names (e.g. "AUDUSD"
-# instead of "AUDUSD-OTC").  These are still OTC instruments and always open.
-_ALWAYS_OPEN_NAMES = {"AUDUSD", "EURUSD", "GBPUSD", "EURJPY", "USDCAD", "USDCHF"}
+# IQ Option sometimes returns OTC assets under plain Forex names (e.g. "EURUSD"
+# instead of "EURUSD-OTC").  These are still OTC instruments and always open.
+_ALWAYS_OPEN_NAMES = {"USDAED", "EURUSD", "GBPUSD", "EURJPY", "USDCAD", "USDCHF"}
 
 
 # ── Silence iqoptionapi internal noise ────────────────────────────────────────

@@ -9,7 +9,7 @@
 const OTC_ASSETS = [
   'EUR/USD (OTC)',
   'GBP/USD (OTC)',
-  'AUD/USD (OTC)',
+  'USD/AED (OTC)',
   'EUR/JPY (OTC)',
 ];
 

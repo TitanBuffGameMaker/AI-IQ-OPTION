@@ -53,7 +53,6 @@ ASSET_KEYWORDS = {
     "USDJPY":  ["JPY", "USD", "yen", "dollar", "Bank of Japan", "BOJ", "USDJPY"],
     "EURJPY":  ["EUR", "JPY", "euro", "yen", "ECB", "Bank of Japan", "EURJPY"],
     "USDAED":  ["AED", "USD", "dirham", "dollar", "UAE", "USDAED"],
-    "AUDUSD":  ["AUD", "USD", "aussie", "dollar", "RBA", "Reserve Bank Australia"],
     "BTCUSD":  ["bitcoin", "BTC", "crypto", "cryptocurrency", "BTCUSD"],
     "GOLD":    ["gold", "XAU", "precious metals", "safe haven"],
 }
