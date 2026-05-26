@@ -70,6 +70,7 @@ _pending_creds: Dict[str, str] = {}   # {"email":..,"password":..} from UI login
 _worker_sockets: Dict[str, "WebSocket"] = {}   # worker_id → WebSocket
 _worker_results: Dict[str, bytes] = {}          # worker_id → weights_bytes (pending FedAvg)
 _worker_lock    = threading.Lock()              # guards _worker_results dict
+_worker_knowledge_count: int = 0                # total knowledge nodes received from workers
 
 # ── Live-log broadcast ─────────────────────────────────────────────────────────
 _log_buffer: deque = deque(maxlen=300)   # last 300 log lines for new-client catch-up
@@ -1365,6 +1366,42 @@ async def worker_endpoint(ws: WebSocket):
                                    f"(policy_loss={metrics.get('policy_loss',0):.4f})",
                         "level":   "info",
                     })
+
+            elif mtype == "knowledge_result":
+                # Worker researched knowledge from Wikipedia/Google News — inject into brain
+                global _worker_knowledge_count
+                nodes_data = msg.get("nodes", [])
+                if nodes_data and _brain:
+                    from trading_ai.brain.knowledge_node import KnowledgeNode
+                    import uuid as _uuid
+                    nodes = []
+                    for d in nodes_data:
+                        try:
+                            if "node_id" not in d:
+                                d["node_id"] = str(_uuid.uuid4())[:8]
+                            nodes.append(KnowledgeNode.from_dict(d))
+                        except Exception as _nd_exc:
+                            logger.debug("Knowledge node parse error: %s", _nd_exc)
+                    if nodes:
+                        try:
+                            _brain.reasoner.absorb_internet_knowledge(nodes)
+                            _worker_knowledge_count += len(nodes)
+                            logger.info(
+                                "Worker %s contributed %d knowledge nodes (total=%d)",
+                                worker_id, len(nodes), _worker_knowledge_count,
+                            )
+                            broadcast_sync({
+                                "type":    "status",
+                                "message": f"🧠 {worker_name}: ส่งความรู้ {len(nodes)} nodes — brain เรียนรู้แล้ว",
+                                "level":   "success",
+                            })
+                            broadcast_sync({
+                                "type":             "workers",
+                                "count":            len(_worker_sockets),
+                                "knowledge_nodes":  _worker_knowledge_count,
+                            })
+                        except Exception as _absorb_exc:
+                            logger.error("absorb_internet_knowledge failed: %s", _absorb_exc)
 
     except WebSocketDisconnect:
         pass

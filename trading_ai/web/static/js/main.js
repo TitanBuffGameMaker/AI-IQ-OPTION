@@ -1379,6 +1379,7 @@ const _workerList = [];
 
 function applyWorkers(msg) {
   const count = msg.count || 0;
+  const knowledgeNodes = msg.knowledge_nodes;
 
   // Badge on tab button
   const badge = document.getElementById('worker-tab-badge');
@@ -1394,6 +1395,12 @@ function applyWorkers(msg) {
     countBadge.style.background = count > 0 ? '#00c87a' : '#555';
   }
 
+  // Knowledge nodes counter
+  if (knowledgeNodes !== undefined) {
+    const knEl = document.getElementById('worker-knowledge-count');
+    if (knEl) knEl.textContent = `🧠 ความรู้จาก Workers: ${knowledgeNodes} nodes`;
+  }
+
   // Worker list (track connect events from status messages)
   const listEl = document.getElementById('worker-list');
   if (!listEl) return;
@@ -1404,7 +1411,7 @@ function applyWorkers(msg) {
       `<div style="display:flex;align-items:center;gap:6px;padding:5px 0;border-bottom:1px solid var(--border);font-size:11px;">
         <span style="color:#00c87a;font-size:14px;">●</span>
         <span>Worker เครื่องที่ ${i + 1}</span>
-        <span style="margin-left:auto;color:var(--text-muted);font-size:10px;">กำลัง train</span>
+        <span style="margin-left:auto;color:var(--text-muted);font-size:10px;">กำลัง train + research</span>
       </div>`
     ).join('');
   }
@@ -1447,7 +1454,7 @@ function downloadWorkerBat() {
     '',
     'echo.',
     'echo กำลังติดตั้ง dependencies...',
-    'pip install websockets torch numpy --quiet --upgrade',
+    'pip install websockets torch numpy requests --quiet --upgrade',
     '',
     'echo.',
     'echo กำลังเชื่อมต่อ...',
