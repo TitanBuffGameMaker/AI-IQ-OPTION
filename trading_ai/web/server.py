@@ -58,6 +58,7 @@ _env          = None
 _capital_guard = None   # CapitalGuard — loaded lazily alongside brain
 _ai_running  = False
 _trade_stats = {"trades": 0, "wins": 0, "pnl": 0.0}
+_stats_lock  = threading.Lock()   # guards _trade_stats writes from AI thread
 _trade_history: deque = deque(maxlen=200)
 _open_orders: Dict[int, Dict] = {}   # order_id → {asset, action, amount, expiry_ts, open_time, manual}
 _check_results: List[Dict] = []
@@ -1518,10 +1519,11 @@ def _await_manual_trade_result(order_id: int, asset_display: str, direction: str
                             "message": f"⚠️ Manual trade {asset_display}: ผลลัพธ์ไม่ทราบ",
                             "level": "warn"})
             return
-        _trade_stats["trades"] += 1
-        if pnl > 0:
-            _trade_stats["wins"] += 1
-        _trade_stats["pnl"] += pnl
+        with _stats_lock:
+            _trade_stats["trades"] += 1
+            if pnl > 0:
+                _trade_stats["wins"] += 1
+            _trade_stats["pnl"] += pnl
         bal = _connector.get_balance()
         entry = {
             "time":       time.strftime("%H:%M:%S"),
@@ -1535,7 +1537,8 @@ def _await_manual_trade_result(order_id: int, asset_display: str, direction: str
         }
         _trade_history.append(entry)
         _save_trade_stats()
-        wr = _trade_stats["wins"] / max(_trade_stats["trades"], 1)
+        with _stats_lock:
+            wr = _trade_stats["wins"] / max(_trade_stats["trades"], 1)
         broadcast_sync({
             "type":      "trade",
             "order_id":  int(order_id),
@@ -1806,13 +1809,17 @@ def _ai_loop():
             pnl = info.get("pnl", 0.0)
             logger.info("Trade %s on %s completed: pnl=%+.2f total_trades=%d",
                         action_name, display_name, pnl, _trade_stats["trades"] + 1)
-            _brain.learn(pnl, final_action, indicator_vec, ppo_action, next_obs=next_obs,
-                         candles=getattr(_env, "_last_candles", None))
+            try:
+                _brain.learn(pnl, final_action, indicator_vec, ppo_action, next_obs=next_obs,
+                             candles=getattr(_env, "_last_candles", None))
+            except Exception as _learn_exc:
+                logger.error("brain.learn() failed (trade still counted): %s", _learn_exc)
 
-            _trade_stats["trades"] += 1
-            if pnl > 0:
-                _trade_stats["wins"] += 1
-            _trade_stats["pnl"] += pnl
+            with _stats_lock:
+                _trade_stats["trades"] += 1
+                if pnl > 0:
+                    _trade_stats["wins"] += 1
+                _trade_stats["pnl"] += pnl
 
             # ── Capital Guard: record PnL + broadcast status ───────────────
             if _capital_guard:

@@ -72,6 +72,7 @@ class TradingEnv(gym.Env):
         self._episode_pnl:        float = 0.0
         self._last_obs:           Optional[np.ndarray] = None
         self._last_candles:       Optional[pd.DataFrame] = None
+        self._trade_amount:       float = config.TRADE_AMOUNT  # overridden by server for Kelly sizing
 
         # สำหรับ Sharpe reward
         self._reward_history: deque = deque(maxlen=config.SHARPE_WINDOW)
@@ -161,7 +162,7 @@ class TradingEnv(gym.Env):
         success, order_id = self.connector.place_trade(
             asset=asset,
             direction=direction,
-            amount=config.TRADE_AMOUNT,
+            amount=self._trade_amount,
             duration_minutes=config.TRADE_DURATION,
         )
         if not success or order_id is None:
@@ -171,7 +172,7 @@ class TradingEnv(gym.Env):
         # so the dashboard can show a live countdown).
         if self.on_trade_placed:
             try:
-                self.on_trade_placed(order_id, asset, direction, config.TRADE_AMOUNT,
+                self.on_trade_placed(order_id, asset, direction, self._trade_amount,
                                      config.TRADE_DURATION)
             except Exception as exc:
                 logger.debug("on_trade_placed hook error: %s", exc)
