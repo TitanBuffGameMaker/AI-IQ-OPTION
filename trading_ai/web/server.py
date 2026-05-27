@@ -69,6 +69,7 @@ _pending_creds: Dict[str, str] = {}   # {"email":..,"password":..} from UI login
 # ── Distributed Workers ────────────────────────────────────────────────────────
 _worker_sockets: Dict[str, "WebSocket"] = {}   # worker_id → WebSocket
 _worker_results: Dict[str, bytes] = {}          # worker_id → weights_bytes (pending FedAvg)
+_worker_names:  Dict[str, str]    = {}          # worker_id → machine name
 _worker_lock    = threading.Lock()              # guards _worker_results dict
 _worker_knowledge_count: int = 0                # total knowledge nodes received from workers
 
@@ -1361,33 +1362,47 @@ async def _lifespan(application):
         # ── Graceful shutdown ──────────────────────────────────────────────
         _ai_running = False
 
-        # Wake the trading env if it's sleeping inside an expiry wait.
+        # Force-exit MUST start first — before any call that could block.
+        # If _brain.shutdown() or _connector.disconnect() hang (file lock /
+        # WebSocket close stall), the timer below guarantees we still exit.
+        def _force_exit():
+            import time as _t, os as _os
+            _t.sleep(8)
+            logger.warning("Forcing process exit (hung threads).")
+            _os._exit(0)
+        threading.Thread(target=_force_exit, daemon=True, name="force-exit").start()
+
+        # Wake the trading env so it stops waiting for trade expiry.
         if _env:
             try:
                 _env.stop()
             except Exception:
                 pass
 
+        # Brain shutdown: save knowledge graph — give it 5 s max.
         if _brain:
-            try:
-                _brain.shutdown()
-                logger.info("Brain saved on shutdown.")
-            except Exception as _e:
-                logger.debug("Brain shutdown: %s", _e)
-        if _connector:
-            try:
-                _connector.disconnect()
-            except Exception:
-                pass
+            def _shutdown_brain():
+                try:
+                    _brain.shutdown()
+                    logger.info("Brain saved on shutdown.")
+                except Exception as _e:
+                    logger.debug("Brain shutdown error: %s", _e)
+            _bt = threading.Thread(target=_shutdown_brain, daemon=True, name="brain-shutdown")
+            _bt.start()
+            _bt.join(timeout=5)
+            if _bt.is_alive():
+                logger.warning("Brain shutdown timed out — continuing.")
 
-        # Force-exit after 8 s if non-daemon IQ Option internal threads
-        # prevent Python from exiting cleanly.
-        def _force_exit():
-            import time as _t, os as _os
-            _t.sleep(8)
-            logger.warning("Forcing process exit (hung threads).")
-            _os._exit(0)
-        threading.Thread(target=_force_exit, daemon=True).start()
+        # Connector disconnect: close IQ Option WebSocket — give it 3 s max.
+        if _connector:
+            def _do_disconnect():
+                try:
+                    _connector.disconnect()
+                except Exception:
+                    pass
+            _dt = threading.Thread(target=_do_disconnect, daemon=True, name="connector-disconnect")
+            _dt.start()
+            _dt.join(timeout=3)
 
 
 app = FastAPI(title="IQ Option AI Trading Dashboard", docs_url=None, lifespan=_lifespan)
@@ -1579,6 +1594,20 @@ async def worker_endpoint(ws: WebSocket):
 
             if mtype == "hello":
                 worker_name = msg.get("name", f"Worker-{worker_id}")
+                # Reject if another socket from the same machine is still active —
+                # prevents double-started worker.py instances from piling up.
+                existing = [wid for wid, wname in _worker_names.items()
+                            if wname == worker_name and wid != worker_id]
+                if existing:
+                    logger.warning("Worker %s rejected — %s already connected as %s",
+                                   worker_id, worker_name, existing[0])
+                    await ws.send_text(json.dumps({
+                        "type": "error",
+                        "message": f"{worker_name} already connected — please close the other instance.",
+                    }))
+                    await ws.close(code=1008)
+                    return
+                _worker_names[worker_id] = worker_name
                 await ws.send_text(json.dumps({
                     "type": "welcome",
                     "worker_id": worker_id,
@@ -1650,6 +1679,7 @@ async def worker_endpoint(ws: WebSocket):
         logger.error("Worker %s error: %s", worker_id, exc)
     finally:
         _worker_sockets.pop(worker_id, None)
+        _worker_names.pop(worker_id, None)
         with _worker_lock:
             _worker_results.pop(worker_id, None)
         logger.info("Worker %s disconnected (remaining=%d)", worker_id, len(_worker_sockets))
@@ -2601,7 +2631,7 @@ def _price_loop():
     Resolves the correct IQ Option API name for each OTC asset automatically.
     """
     tick = 0
-    while True:
+    while _ai_running:
         for display_name in OTC_ASSETS:
             api_name = _resolve_asset_name(display_name)
             if not api_name:
