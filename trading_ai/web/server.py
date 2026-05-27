@@ -56,6 +56,14 @@ _brain        = None
 _knowledge    = None
 _env          = None
 _capital_guard = None   # CapitalGuard — loaded lazily alongside brain
+
+# ── Next-gen AI agents (ลำดับ 1-5) ────────────────────────────────────────────
+_rainbow      = None   # 1. Rainbow DQN  (C51 + Noisy + Dueling + Double + PER)
+_hrl          = None   # 2. Hierarchical RL (Gate + Direction wrapping Rainbow)
+_iqn          = None   # 3. IQN — Implicit Quantile Network (distributional)
+_maml         = None   # 4. MAML — meta-learning wrapper (fast OTC adaptation)
+_world_trainer = None  # 5. World Model trainer (background imagination thread)
+
 _ai_running  = False
 _trade_stats = {"trades": 0, "wins": 0, "pnl": 0.0}
 _stats_lock  = threading.Lock()   # guards _trade_stats writes from AI thread
@@ -1383,13 +1391,30 @@ async def _lifespan(application):
             except Exception:
                 pass
 
-        # Save PPO checkpoint before shutdown so learning survives restart.
+        # Save all agents on shutdown so learning survives restart.
         if _knowledge and _agent:
             try:
                 _knowledge.save_brain(_agent)
                 logger.info("PPO checkpoint saved on shutdown.")
             except Exception as _ce:
                 logger.debug("Checkpoint save on shutdown failed: %s", _ce)
+        try:
+            _active_ng_sd = _maml if _maml is not None else _hrl
+            if _active_ng_sd is not None:
+                _active_ng_sd.save(os.path.join(config.MODEL_DIR, "rainbow.pt"))
+                logger.info("HRL/MAML checkpoint saved on shutdown.")
+            elif _rainbow is not None:
+                _rainbow.save(os.path.join(config.MODEL_DIR, "rainbow.pt"))
+                logger.info("Rainbow checkpoint saved on shutdown.")
+            if _iqn is not None:
+                _iqn.save(os.path.join(config.MODEL_DIR, "iqn.pt"))
+                logger.info("IQN checkpoint saved on shutdown.")
+            if _world_trainer is not None:
+                _world_trainer.stop()
+                _world_trainer.save(os.path.join(config.MODEL_DIR, "world_model.pt"))
+                logger.info("WorldModel checkpoint saved on shutdown.")
+        except Exception as _ng_ce:
+            logger.debug("Next-gen agent shutdown save error: %s", _ng_ce)
 
         # Brain shutdown: save knowledge graph — give it 5 s max.
         if _brain:
@@ -2147,19 +2172,49 @@ def _ai_loop():
             # A short yield here lets the event loop breathe between assets.
             time.sleep(0.1)
             indicator_vec = asset_obs[:N_INDICATORS]
-            ppo_action, log_prob, value = _agent.select_action(asset_obs)
+
+            # ── ลำดับ 2+4: HRL/MAML decision (primary if trained enough) ─────
+            _active_ng = _maml if _maml is not None else _hrl  # maml wraps hrl
+            if _active_ng is not None and _active_ng.total_steps > 50:
+                ng_action, log_prob, value = _active_ng.select_action(asset_obs)
+                _, ng_conf = _active_ng.get_confidence(asset_obs)
+            else:
+                ng_action, ng_conf = None, 0.0
+                log_prob = value = 0.0
+
+            # ── ลำดับ 3: IQN distributional confidence ──────────────────────
+            if _iqn is not None and _iqn.total_steps > 30:
+                iqn_action, iqn_conf = _iqn.get_confidence(asset_obs)
+                iqn_uncertainty = _iqn.get_uncertainty(asset_obs)
+            else:
+                iqn_action, iqn_conf, iqn_uncertainty = None, 0.0, 1.0
+
+            # ── PPO fallback ─────────────────────────────────────────────────
+            ppo_action, ppo_lp, ppo_val = _agent.select_action(asset_obs)
             _, ppo_conf = _agent.get_confidence(asset_obs)
-            # Switch brain mode: OTC = pattern-only, Forex = full 8-layer fusion
+            if ng_action is None:
+                log_prob, value = ppo_lp, ppo_val
+
+            # ── Ensemble: pick best action ───────────────────────────────────
+            # HRL/MAML > IQN > PPO, weighted by confidence and training maturity
+            if ng_action is not None and ng_conf >= ppo_conf:
+                best_action, best_conf = ng_action, ng_conf
+            elif iqn_action is not None and iqn_conf >= ppo_conf and iqn_uncertainty < 0.5:
+                best_action, best_conf = iqn_action, iqn_conf
+            else:
+                best_action, best_conf = ppo_action, ppo_conf
+
+            # ── Switch brain mode: OTC = pattern-only, Forex = full signals ──
             _brain.set_market_mode("OTC" if is_otc_asset(display_name) else "FOREX")
             # Pass raw candles so brain can do pattern-memory lookup
-            signal = _brain.think(indicator_vec, ppo_action, ppo_conf,
+            signal = _brain.think(indicator_vec, best_action, best_conf,
                                   candles=getattr(_env, "_last_candles", None))
 
             # Adjust final action through brain's risk multiplier + confidence gate
-            final_action = ppo_action
+            final_action = best_action
             if signal.risk_multiplier < 0.2:
                 final_action = 0
-            elif signal.action != ppo_action and signal.confidence > ppo_conf + 0.15:
+            elif signal.action != best_action and signal.confidence > best_conf + 0.15:
                 final_action = signal.action
 
             candidates.append({
@@ -2338,13 +2393,21 @@ def _ai_loop():
             _trade_history.append(entry)
             _save_trade_stats()
 
-            # Periodic brain.pt save — every 20 trades so learning survives restarts.
-            # (PPO update only saves every 128 steps; without this, all learning is
-            # lost if the session ends before accumulating that many steps.)
-            if _knowledge and _agent and _trade_stats["trades"] % 20 == 0:
+            # Periodic checkpoint — every 20 trades (PPO + all next-gen agents)
+            if _trade_stats["trades"] % 20 == 0:
                 try:
-                    _knowledge.save_brain(_agent)
-                    logger.debug("Periodic brain checkpoint saved (%d trades)",
+                    if _knowledge and _agent:
+                        _knowledge.save_brain(_agent)
+                    _active_ng = _maml if _maml is not None else _hrl
+                    if _active_ng is not None:
+                        _active_ng.save(os.path.join(config.MODEL_DIR, "rainbow.pt"))
+                    elif _rainbow is not None:
+                        _rainbow.save(os.path.join(config.MODEL_DIR, "rainbow.pt"))
+                    if _iqn is not None:
+                        _iqn.save(os.path.join(config.MODEL_DIR, "iqn.pt"))
+                    if _world_trainer is not None:
+                        _world_trainer.save(os.path.join(config.MODEL_DIR, "world_model.pt"))
+                    logger.debug("Periodic checkpoint saved (%d trades)",
                                  _trade_stats["trades"])
                 except Exception as _ckpt_e:
                     logger.debug("Periodic checkpoint save error: %s", _ckpt_e)
@@ -2387,9 +2450,50 @@ def _ai_loop():
         except Exception as _strat_exc:
             logger.debug("Strategy broadcast error: %s", _strat_exc)
 
-        _agent.store(obs, next_obs, ppo_action, log_prob, reward, value,
-                     terminated or truncated)
+        _done = terminated or truncated
+        _agent.store(obs, next_obs, ppo_action, log_prob, reward, value, _done)
 
+        # ── Feed all next-gen agents from the same experience ────────────────
+        _active_ng = _maml if _maml is not None else _hrl
+        if _active_ng is not None:
+            try:
+                _active_ng.store(obs, next_obs, final_action, log_prob, reward, value, _done)
+            except Exception as _ng_e:
+                logger.debug("HRL/MAML store error: %s", _ng_e)
+        if _iqn is not None:
+            try:
+                _iqn.store(obs, next_obs, final_action, 0.0, reward, 0.0, _done)
+            except Exception as _iq_e:
+                logger.debug("IQN store error: %s", _iq_e)
+        if _rainbow is not None and _hrl is None:
+            # Only store to standalone Rainbow if HRL is not present
+            # (HRL.rainbow already receives it via _active_ng.store)
+            try:
+                _rainbow.store(obs, next_obs, final_action, 0.0, reward, 0.0, _done)
+            except Exception as _rb_e:
+                logger.debug("Rainbow store error: %s", _rb_e)
+
+        # ── World Model: feed real experience + inject imagined rollouts ──────
+        if _world_trainer is not None:
+            try:
+                _world_trainer.add_experience(obs, action, reward, next_obs)
+                # Drain imagined batch and add to HRL/Rainbow buffer
+                imagined = _world_trainer.get_imagined_batch(n=4)
+                for im in imagined:
+                    if _active_ng is not None:
+                        _active_ng.rainbow.per.add(
+                            im["obs"], im["next_obs"], im["action"],
+                            im["reward"] * 0.5, rpe_mult=0.5,
+                        )
+                    elif _rainbow is not None:
+                        _rainbow.per.add(
+                            im["obs"], im["next_obs"], im["action"],
+                            im["reward"] * 0.5, rpe_mult=0.5,
+                        )
+            except Exception as _wm_e:
+                logger.debug("WorldModel feed error: %s", _wm_e)
+
+        # ── PPO update (unchanged) ────────────────────────────────────────────
         if _agent.ready_to_update():
             # Dispatch to workers BEFORE local update (workers get same buffer)
             if _worker_sockets:
@@ -2425,6 +2529,30 @@ def _ai_loop():
                 "steps":       _agent.total_steps,
                 "workers":     len(_worker_sockets),
             })
+
+        # ── Next-gen agents: online update (every trade) ──────────────────────
+        if _active_ng is not None and _active_ng.ready_to_update():
+            try:
+                ng_metrics = _active_ng.update(next_obs)
+                if ng_metrics:
+                    broadcast_sync({
+                        "type":        "training",
+                        "rainbow_loss": round(ng_metrics.get("rainbow_loss", 0), 4),
+                        "gate_loss":    round(ng_metrics.get("gate_loss", 0), 4),
+                        "dir_loss":     round(ng_metrics.get("dir_loss", 0), 4),
+                        "maml_loss":    round(ng_metrics.get("maml_meta_loss", 0), 4),
+                        "iqn_loss":     0.0,
+                        "updates":      _active_ng.total_updates,
+                        "steps":        _active_ng.total_steps,
+                        "workers":      len(_worker_sockets),
+                    })
+            except Exception as _ng_upd_e:
+                logger.debug("HRL/MAML update error: %s", _ng_upd_e)
+        if _iqn is not None and _iqn.ready_to_update():
+            try:
+                _iqn.update(next_obs)
+            except Exception as _iq_upd_e:
+                logger.debug("IQN update error: %s", _iq_upd_e)
 
         obs = next_obs
         if terminated or truncated:
@@ -2675,6 +2803,63 @@ def _init_components():
     _brain.desire_engine.set_notify_callback(_on_desire_registered)
     _brain.journal.set_entry_callback(_on_journal_entry)
     _brain.nas.set_champion_agent(_agent)   # enable weight transfer to same-arch challengers
+
+    # ── ลำดับ 1: Rainbow DQN ──────────────────────────────────────────────────
+    try:
+        from trading_ai.models.rainbow_dqn import RainbowAgent
+        _rainbow = RainbowAgent(obs_size=OBS_SIZE, n_actions=3)
+        _rb_path = os.path.join(config.MODEL_DIR, "rainbow.pt")
+        _rainbow.load(_rb_path)
+        broadcast_sync({"type":"status","message":"🌈 Rainbow DQN โหลดแล้ว","level":"info"})
+    except Exception as _e:
+        logger.warning("Rainbow DQN init failed: %s", _e)
+        _rainbow = None
+
+    # ── ลำดับ 2: Hierarchical RL (Gate + Direction) ──────────────────────────
+    try:
+        from trading_ai.models.hierarchical_rl import HierarchicalAgent
+        _hrl = HierarchicalAgent(obs_size=OBS_SIZE, n_actions=3)
+        _hrl_path = os.path.join(config.MODEL_DIR, "rainbow.pt")
+        _hrl.load(_hrl_path)
+        broadcast_sync({"type":"status","message":"🎯 Hierarchical RL โหลดแล้ว","level":"info"})
+    except Exception as _e:
+        logger.warning("HRL init failed: %s", _e)
+        _hrl = None
+
+    # ── ลำดับ 3: IQN ─────────────────────────────────────────────────────────
+    try:
+        from trading_ai.models.iqn_agent import IQNAgent
+        _is_real = (config.IQ_ACCOUNT_TYPE or "PRACTICE").upper() == "REAL"
+        _iqn = IQNAgent(obs_size=OBS_SIZE, n_actions=3, conservative=_is_real)
+        _iqn_path = os.path.join(config.MODEL_DIR, "iqn.pt")
+        _iqn.load(_iqn_path)
+        broadcast_sync({"type":"status","message":"📊 IQN โหลดแล้ว","level":"info"})
+    except Exception as _e:
+        logger.warning("IQN init failed: %s", _e)
+        _iqn = None
+
+    # ── ลำดับ 4: MAML (wraps HRL → Rainbow) ─────────────────────────────────
+    try:
+        from trading_ai.brain.maml_agent import MAMLAgent
+        _base_for_maml = _hrl if _hrl is not None else _rainbow
+        if _base_for_maml is not None:
+            _maml = MAMLAgent(_base_for_maml)
+            broadcast_sync({"type":"status","message":"🧬 MAML meta-learning พร้อม","level":"info"})
+    except Exception as _e:
+        logger.warning("MAML init failed: %s", _e)
+        _maml = None
+
+    # ── ลำดับ 5: World Model (background thread) ────────────────────────────
+    try:
+        from trading_ai.brain.world_model import WorldModelTrainer
+        _world_trainer = WorldModelTrainer(obs_size=OBS_SIZE)
+        _wm_path = os.path.join(config.MODEL_DIR, "world_model.pt")
+        _world_trainer.load(_wm_path)
+        _world_trainer.start()
+        broadcast_sync({"type":"status","message":"🌍 World Model thread เริ่มแล้ว","level":"info"})
+    except Exception as _e:
+        logger.warning("WorldModel init failed: %s", _e)
+        _world_trainer = None
 
     from trading_ai.brain.capital_guard import CapitalGuard
     _capital_guard = CapitalGuard(account_type=config.IQ_ACCOUNT_TYPE)
