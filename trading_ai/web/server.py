@@ -1340,10 +1340,19 @@ def _install_ws_log_handler() -> None:
     root.addHandler(handler)
 
 # ── FastAPI app ───────────────────────────────────────────────────────────────
+def _asyncio_exc_handler(loop, context):
+    """Suppress harmless ConnectionResetError spam from worker WebSocket drops."""
+    exc = context.get("exception")
+    if isinstance(exc, (ConnectionResetError, BrokenPipeError)):
+        return   # WinError 10054 / worker disconnect noise — ignore
+    loop.default_exception_handler(context)
+
+
 @contextlib.asynccontextmanager
 async def _lifespan(application):
     global _loop, _ai_running
     _loop = asyncio.get_running_loop()
+    _loop.set_exception_handler(_asyncio_exc_handler)
     _install_ws_log_handler()
     threading.Thread(target=_init_components, daemon=True).start()
     try:

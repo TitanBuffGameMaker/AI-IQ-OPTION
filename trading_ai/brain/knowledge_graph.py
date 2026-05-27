@@ -13,6 +13,7 @@ Persisted as a JSON file so the brain survives across sessions.
 import json
 import logging
 import os
+import time as _time
 import threading
 from collections import defaultdict
 from datetime import datetime
@@ -238,7 +239,15 @@ class KnowledgeGraph:
         tmp = self._graph_path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
-        os.replace(tmp, self._graph_path)  # atomic write
+        # Windows: os.replace fails with WinError 32 if another thread holds the
+        # file open — retry with backoff instead of crashing.
+        for _attempt in range(6):
+            try:
+                os.replace(tmp, self._graph_path)
+                break
+            except OSError:
+                if _attempt < 5:
+                    _time.sleep(0.15 * (_attempt + 1))
         logger.debug("Brain graph saved (%d nodes)", len(self._nodes))
 
     def load(self):

@@ -172,7 +172,11 @@ class IQOptionConnector:
             except Exception as exc:
                 _last_connect_time = time.time()
                 logger.error("Connection error: %s", exc)
-                self._dead = True   # หยุด auto-retry
+                # Only permanently block reconnects for brand-new sessions
+                # (wrong credentials).  Mid-session drops are transient and
+                # must be retried — do NOT set _dead here.
+                if not self._ever_connected:
+                    self._dead = True
                 return False, str(exc)
 
     def submit_otp(self, otp: str) -> bool:
@@ -225,11 +229,17 @@ class IQOptionConnector:
 
     def ensure_connected(self) -> bool:
         """Reconnect if session dropped. Only retries after a previous successful connection."""
-        if self._in_2fa or self._dead:
+        # _dead is only set for first-time credential failures or rate limits.
+        # Mid-session drops reset _dead automatically so we can retry.
+        if self._in_2fa:
             return False
-        # ถ้ายังไม่เคย connect สำเร็จเลย ห้าม auto-retry (ต้องแก้ .env หรือรอ rate limit)
         if not self._ever_connected:
             return False
+        # If _dead was set by a mid-session exception (transient), clear it so
+        # we can attempt reconnection.  Rate-limit dead is preserved by the
+        # caller setting it again inside connect().
+        if self._dead and self._ever_connected:
+            self._dead = False
         if not self._connected or not self.api:
             ok, _ = self.connect()
             return ok
