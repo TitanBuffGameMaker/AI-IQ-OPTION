@@ -16,6 +16,7 @@ Break-even win rate: WR > 1/(1 + payout)
   89% payout → need > 53.0% win rate
 """
 import logging
+import threading
 import time
 from collections import deque
 from typing import Optional, Tuple
@@ -91,6 +92,13 @@ class TradingEnv(gym.Env):
         # สำหรับ drawdown protection
         self._peak_balance:   float = 0.0
         self._trade_count_episode: int = 0
+
+        # Set by server on shutdown so the expiry wait can be interrupted.
+        self._stop_event: threading.Event = threading.Event()
+
+    def stop(self) -> None:
+        """Signal the env to stop waiting — called during server shutdown."""
+        self._stop_event.set()
 
     # ── Asset rotation (for multi-asset AI loop) ────────────────────────────
 
@@ -196,11 +204,17 @@ class TradingEnv(gym.Env):
 
         wait_seconds = config.TRADE_DURATION * 60 + 5
         logger.info("Trade %s placed on %s — waiting %ds for expiry…", order_id, asset, wait_seconds)
-        time.sleep(wait_seconds)
+        # Interruptible wait: server sets _stop_event on shutdown so we don't
+        # block Ctrl+C for a full minute.
+        self._stop_event.wait(timeout=wait_seconds)
+        if self._stop_event.is_set():
+            logger.info("Trade %s: shutdown during expiry wait — result skipped", order_id)
+            return 0.0, {"action": direction, "pnl": 0.0, "skipped": True}
 
-        # Try official API first (30s), fall back to balance delta if it times out.
+        # OTC binary options rarely return a proper check_win_v3 event —
+        # 10s is enough to catch the rare success; balance delta handles the rest.
         pnl_result = self.connector.get_trade_result(
-            order_id, timeout=30, balance_before=balance_before
+            order_id, timeout=10, balance_before=balance_before
         )
         if self.on_trade_closed:
             try:

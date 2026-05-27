@@ -1360,6 +1360,14 @@ async def _lifespan(application):
     finally:
         # ── Graceful shutdown ──────────────────────────────────────────────
         _ai_running = False
+
+        # Wake the trading env if it's sleeping inside an expiry wait.
+        if _env:
+            try:
+                _env.stop()
+            except Exception:
+                pass
+
         if _brain:
             try:
                 _brain.shutdown()
@@ -1371,6 +1379,15 @@ async def _lifespan(application):
                 _connector.disconnect()
             except Exception:
                 pass
+
+        # Force-exit after 8 s if non-daemon IQ Option internal threads
+        # prevent Python from exiting cleanly.
+        def _force_exit():
+            import time as _t, os as _os
+            _t.sleep(8)
+            logger.warning("Forcing process exit (hung threads).")
+            _os._exit(0)
+        threading.Thread(target=_force_exit, daemon=True).start()
 
 
 app = FastAPI(title="IQ Option AI Trading Dashboard", docs_url=None, lifespan=_lifespan)
