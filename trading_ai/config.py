@@ -32,9 +32,10 @@ class Config:
     ENTROPY_COEF:     float = 0.01
     VALUE_LOSS_COEF:  float = 0.5
     MAX_GRAD_NORM:    float = 0.5
-    PPO_EPOCHS:       int   = 10       # เพิ่มจาก 4 เป็น 10
-    BATCH_SIZE:       int   = 64
-    UPDATE_EVERY:     int   = 1024     # ลดจาก 2048 เพื่อ update บ่อยขึ้น
+    PPO_EPOCHS:       int   = 6        # reduced: fewer epochs per small batch
+    BATCH_SIZE:       int   = 32
+    UPDATE_EVERY:     int   = 128      # 128 steps ≈ every 2 min → frequent gradient signal
+    USE_V2:           bool  = True     # Semi-Pro ActorCriticV2 (TFT + MoE)
 
     # ── Knowledge persistence ──────────────────────────────────────────────
     MODEL_DIR:         str = os.getenv("MODEL_DIR", "./knowledge")

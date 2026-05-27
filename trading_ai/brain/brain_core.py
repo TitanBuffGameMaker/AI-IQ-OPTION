@@ -27,7 +27,19 @@ from trading_ai.brain.internet.economic_calendar import EconomicCalendar
 from trading_ai.brain.internet.web_researcher import WebResearcher
 from trading_ai.brain.internet.knowledge_researcher import KnowledgeResearcher
 from trading_ai.brain.memory.pattern_memory import CandlePatternMemory
+from trading_ai.brain.memory.sequence_memory import TemporalSequenceMemory
 from trading_ai.brain.reasoning.brain_reasoner import BrainReasoner, BrainSignal
+from trading_ai.brain.reasoning.rule_distiller import RuleDistillationEngine
+from trading_ai.brain.uncertainty import UncertaintyEstimator
+from trading_ai.brain.ethics import get_principles, evaluate_desire
+from trading_ai.brain.desire import DesireEngine
+from trading_ai.brain.graduation import GraduationSystem
+from trading_ai.brain.neuro import CLSMemory, DopamineSystem, FearSystem, SleepCycle
+from trading_ai.brain.nas import NASEngine
+from trading_ai.brain.nas.nas_engine import NASConfig
+from trading_ai.models.per_buffer import PrioritizedReplayBuffer
+from trading_ai.brain.analysis import MetaStrategyEngine, WeakPointFinder
+from trading_ai.brain.journal import AIJournal
 from trading_ai.brain.working_memory import WorkingMemory
 from trading_ai.brain.strategy_library import StrategyLibrary
 from trading_ai.brain.self_reflection import SelfReflectionEngine
@@ -66,9 +78,9 @@ class BrainCore:
     ULTRA Brain — orchestrates all AI subsystems
     """
 
-    INTERNET_REFRESH_INTERVAL = 1800   # 30 min — news fetch
-    RESEARCH_INTERVAL         = 3600   # 1 hour — asset-specific web research
-    KNOWLEDGE_INTERVAL        = 1500   # 25 min — trading-knowledge research
+    INTERNET_REFRESH_INTERVAL = 300    # 5 min — news fetch
+    RESEARCH_INTERVAL         = 300    # 5 min — asset-specific web research
+    KNOWLEDGE_INTERVAL        = 120    # 2 min — trading-knowledge research
                                        # (techniques, strategies, concepts)
 
     def __init__(self, asset: str = None, base_dir: str = None,
@@ -103,11 +115,52 @@ class BrainCore:
         self.pattern_memory  = CandlePatternMemory(base_dir=self.base_dir)
         self._market_mode    = "OTC"   # "OTC" or "REAL"
 
+        # ── Phase 3 additions ────────────────────────────────────────────────
+        self.uncertainty_estimator = UncertaintyEstimator()
+        self.sequence_memory       = TemporalSequenceMemory(base_dir=self.base_dir)
+        self.rule_distiller        = RuleDistillationEngine(base_dir=self.base_dir)
+
+        # ── Ethics & Desire system ───────────────────────────────────────────
+        self.ethics        = get_principles()
+        self.desire_engine = DesireEngine(base_dir=self.base_dir)
+        self._pnl_log: list = []   # rolling pnl for desire trigger logic
+
+        # ── Neuroscience-inspired modules ────────────────────────────────────
+        self.cls_memory   = CLSMemory(hippocampus_size=500)
+        self.dopamine     = DopamineSystem(alpha=0.1, surprise_scale=2.5)
+        self.fear_system  = FearSystem(account_type=self.account_type)
+        self.sleep_cycle  = SleepCycle(trigger_every=50,
+                                       on_sleep_callback=self._on_sleep_state)
+        self._is_sleeping = False
+
+        # ── Graduation system ────────────────────────────────────────────────
+        self.graduation   = GraduationSystem()
+
+        # ── Neural Architecture Search ───────────────────────────────────────
+        self.nas = NASEngine(
+            obs_size=OBS_SIZE,
+            n_actions=3,
+            champion_config=NASConfig(hidden_size=384, lstm_hidden=128, dropout=0.10),
+        )
+
+        # ── Prioritized Experience Replay ────────────────────────────────────
+        self.per_buffer = PrioritizedReplayBuffer(capacity=2000, obs_size=OBS_SIZE)
+
+        # ── Adaptive Confidence — AI ปรับ threshold ตามผลงานตัวเอง ─────────
+        self._perf_window: list = []   # rolling 30-trade win/loss
+        self._conf_multiplier: float = 1.0   # 0.80–1.15
+
+        # ── Context intelligence & self-awareness ────────────────────────────
+        self.meta_strategy = MetaStrategyEngine(base_dir=self.base_dir)
+        self.weak_point    = WeakPointFinder()
+        self.journal       = AIJournal(write_every=50)
+
         # ── State tracking ──────────────────────────────────────────────────
         self._last_strategy_name: str = "Unknown"
         self._last_confidence:    float = 0.5
         self._last_indicator_vec: Optional[np.ndarray] = None
         self._last_regime:        str = "unknown"
+        self._last_uncertainty:   dict = {}
 
         self._stop_event      = threading.Event()
         self._internet_thread = threading.Thread(
@@ -127,6 +180,7 @@ class BrainCore:
         new = (account_type or "PRACTICE").upper()
         self.account_type = new
         self.working_memory.set_account_type(new)
+        self.fear_system.set_account_type(new)
 
     def set_market_mode(self, mode: str) -> None:
         """Switch between 'OTC' and 'REAL' market mode.
@@ -177,6 +231,18 @@ class BrainCore:
 
         self._last_strategy_name = strategy_name
 
+        # ── Uncertainty estimation ───────────────────────────────────────────
+        uncertainty = self.uncertainty_estimator.estimate(
+            indicator_vec=indicator_vec[:40] if len(indicator_vec) >= 40 else indicator_vec,
+            episodic_memory=self.episodic,
+        )
+        self._last_uncertainty = uncertainty
+
+        # ── Sequence memory lookup (trajectory-based hint) ───────────────────
+        seq_result = self.sequence_memory.lookup(
+            indicator_vec[:40] if len(indicator_vec) >= 40 else indicator_vec
+        )
+
         # ── Reasoner with strategy signal ───────────────────────────────────
         signal = self.reasoner.think(
             indicator_vec=indicator_vec,
@@ -189,8 +255,85 @@ class BrainCore:
             mtf_trend=mtf_trend,
         )
 
+        # ── Apply uncertainty to confidence ──────────────────────────────────
+        if self.uncertainty_estimator.should_skip_trade(
+            uncertainty["epistemic"], uncertainty["aleatoric"]
+        ) and signal.action != 0:
+            signal.action     = 0
+            signal.confidence = 0.7
+            signal.reasoning.append(
+                f"⚠️ Uncertainty too high — skipping trade "
+                f"(epistemic={uncertainty['epistemic']:.2f}, "
+                f"aleatoric={uncertainty['aleatoric']:.2f}, "
+                f"familiar={uncertainty['familiar_trades']} trades)"
+            )
+        else:
+            signal.confidence = round(
+                float(np.clip(signal.confidence * uncertainty["conf_multiplier"], 0.0, 0.95)),
+                3,
+            )
+            if uncertainty["epistemic"] > 0.55:
+                signal.reasoning.append(uncertainty["description"])
+
+        # ── Sequence memory boost ────────────────────────────────────────────
+        if seq_result is not None and signal.action != 0:
+            seq_wr, seq_conf, seq_n = seq_result
+            if seq_wr > 0.60:
+                signal.reasoning.append(
+                    f"Sequence: trajectory → BUY bias ({seq_wr:.0%} win rate, n={seq_n})"
+                )
+                if signal.action == 1:
+                    signal.confidence = min(0.95, signal.confidence + seq_conf * 0.05)
+            elif seq_wr < 0.40:
+                signal.reasoning.append(
+                    f"Sequence: trajectory → SELL bias ({1-seq_wr:.0%} win rate, n={seq_n})"
+                )
+                if signal.action == 2:
+                    signal.confidence = min(0.95, signal.confidence + seq_conf * 0.05)
+
+        # ── CLS recall — neocortical wisdom (now actually used) ─────────────
+        cls_recall = self.cls_memory.recall(
+            indicator_vec[:40] if len(indicator_vec) >= 40 else indicator_vec
+        )
+        if cls_recall.get("has_memory") and signal.action != 0:
+            cls_wr = cls_recall["combined_win_rate"]
+            if cls_wr > 0.62:
+                signal.confidence = min(0.95, signal.confidence + 0.04)
+                signal.reasoning.append(
+                    f"CLS neocortex: {cls_wr:.0%} win rate ใน context นี้"
+                )
+            elif cls_wr < 0.38:
+                signal.confidence = max(0.0, signal.confidence - 0.04)
+                signal.reasoning.append(
+                    f"CLS neocortex: {cls_wr:.0%} — context นี้เสี่ยง"
+                )
+
+        # ── MetaStrategy multiplier — context-specific performance ──────────
+        if signal.action != 0:
+            hour = time.localtime().tm_hour
+            meta_mult = self.meta_strategy.get_context_multiplier(
+                asset=self.asset,
+                hour=hour,
+                regime=signal.regime,
+                strategy=strategy_name,
+            )
+            if meta_mult != 1.0:
+                signal.confidence = float(np.clip(signal.confidence * meta_mult, 0.0, 0.95))
+                if meta_mult > 1.1:
+                    signal.reasoning.append(
+                        f"MetaStrategy: context นี้เคยทำได้ดี (×{meta_mult:.2f})"
+                    )
+                elif meta_mult < 0.9:
+                    signal.reasoning.append(
+                        f"MetaStrategy: context นี้เคยทำได้ไม่ดี (×{meta_mult:.2f})"
+                    )
+
+        # ── Adaptive confidence multiplier ───────────────────────────────────
+        signal.confidence = round(
+            float(np.clip(signal.confidence * self._conf_multiplier, 0.0, 0.95)), 4
+        )
+
         # ── Record this cycle's signal strength for recovery tracking ───────
-        # (no-op on PRACTICE; on REAL it counts toward resume-readiness)
         self.working_memory.record_observation(signal.confidence)
 
         # ── Should-pause override (REAL accounts only) ──────────────────────
@@ -246,7 +389,21 @@ class BrainCore:
             for i, name in enumerate(INDICATOR_NAMES)
         }
 
-        # ── FastLearner online update ────────────────────────────────────────
+        # ── Sharpe-inspired reward shaping ──────────────────────────────────────
+        # Raw PnL is too crude — consistent +1% beats volatile +5%/-4% cycles.
+        # Normalise by rolling std so the agent learns risk-adjusted returns.
+        self._pnl_log.append(pnl)
+        if len(self._pnl_log) > 50:
+            self._pnl_log = self._pnl_log[-50:]
+        if len(self._pnl_log) >= 5:
+            pnl_arr = np.array(self._pnl_log, dtype=np.float32)
+            pnl_std = float(pnl_arr.std()) + 1e-6
+            shaped_reward = float(pnl) / pnl_std   # z-score of this trade's PnL
+        else:
+            shaped_reward = float(pnl)
+
+        # ── FastLearner online update (reward scaled by Dopamine RPE) ──────────
+        rpe_mult = self.dopamine.update(pnl)   # surprise → amplify learning
         if next_obs is not None and self._last_indicator_vec is not None:
             try:
                 obs_arr = self._last_indicator_vec.astype(np.float32)
@@ -255,12 +412,12 @@ class BrainCore:
                     self.fast_learner.update_online(
                         obs=obs_arr,
                         action=action_taken,
-                        reward=float(pnl),
+                        reward=shaped_reward * rpe_mult,  # Sharpe + dopamine scaled
                         next_obs=nxt_arr,
                         done=False,
                     )
             except Exception as exc:
-                logger.debug("FastLearner update error: %s", exc)
+                logger.warning("FastLearner update error: %s", exc)
 
         # ── Working memory update ────────────────────────────────────────────
         self.working_memory.update(
@@ -283,6 +440,20 @@ class BrainCore:
         except Exception as exc:
             logger.debug("Reflection error: %s", exc)
 
+        # ── Sequence memory + Rule distillation ─────────────────────────────
+        if len(indicator_vec) >= 20:
+            try:
+                self.sequence_memory.record(
+                    indicator_vec[:40] if len(indicator_vec) >= 40 else indicator_vec,
+                    pnl,
+                )
+            except Exception as exc:
+                logger.debug("SequenceMemory.record error: %s", exc)
+        try:
+            self.rule_distiller.record_trade(snapshot, action_taken, pnl > 0)
+        except Exception as exc:
+            logger.debug("RuleDistiller.record_trade error: %s", exc)
+
         # ── Strategy outcome ─────────────────────────────────────────────────
         self.strategy_lib.record_outcome(self._last_strategy_name, pnl > 0)
 
@@ -294,6 +465,143 @@ class BrainCore:
             ppo_action=ppo_action,
         )
         self._log_brain_state(pnl)
+
+        # ── NAS: evaluate challengers on same obs ───────────────────────────
+        if self._last_indicator_vec is not None:
+            self.nas.observe(
+                obs=self._last_indicator_vec,
+                actual_action=action_taken,
+                pnl=pnl,
+            )
+            if next_obs is not None:
+                self.nas.update_challengers(
+                    obs=self._last_indicator_vec,
+                    action=action_taken,
+                    pnl=pnl,
+                    next_obs=next_obs,
+                )
+
+        # ── Prioritized Replay Buffer — store for future resampling ─────────
+        if self._last_indicator_vec is not None and next_obs is not None:
+            try:
+                self.per_buffer.add(
+                    obs=self._last_indicator_vec.astype(np.float32),
+                    next_obs=next_obs.astype(np.float32),
+                    action=action_taken,
+                    reward=float(pnl),
+                    rpe_mult=rpe_mult,
+                )
+            except Exception:
+                pass
+
+        # ── Adaptive Confidence: adjust multiplier based on rolling win rate ─
+        self._perf_window.append(pnl > 0)
+        if len(self._perf_window) > 30:
+            self._perf_window = self._perf_window[-30:]
+        if len(self._perf_window) >= 20:
+            recent_wr = sum(self._perf_window) / len(self._perf_window)
+            if recent_wr < 0.42:
+                self._conf_multiplier = max(0.80, self._conf_multiplier - 0.01)
+            elif recent_wr > 0.60:
+                self._conf_multiplier = min(1.15, self._conf_multiplier + 0.005)
+            else:
+                self._conf_multiplier += (1.0 - self._conf_multiplier) * 0.05
+
+        # ── Neuroscience modules ─────────────────────────────────────────────
+        # CLS hippocampus: encode this episode fast
+        self.cls_memory.encode(
+            indicators=indicator_vec[:40] if len(indicator_vec) >= 40 else indicator_vec,
+            action=action_taken,
+            pnl=pnl,
+            confidence=self._last_confidence,
+        )
+
+        # Fear system: update emotional state (active only in REAL mode)
+        self.fear_system.update(pnl)
+
+        # Sleep cycle: trigger consolidation every 50 trades
+        self.sleep_cycle.tick(self)
+
+        # Graduation: track this trade
+        self.graduation.record_trade(
+            pnl=pnl,
+            regime=self._last_regime,
+            balance=0.0,   # updated by server when balance known
+        )
+
+        # Desire engine: check if brain should express a want
+        # (_pnl_log already updated above in reward shaping block)
+        self._maybe_generate_desire()
+
+        # ── Context intelligence ─────────────────────────────────────────────
+        hour = time.localtime().tm_hour
+        self.meta_strategy.record(
+            asset=self.asset,
+            hour=hour,
+            regime=self._last_regime,
+            strategy=self._last_strategy_name,
+            pnl=pnl,
+        )
+        self.weak_point.record(
+            regime=self._last_regime,
+            hour=hour,
+            asset=self.asset,
+            strategy=self._last_strategy_name,
+            pnl=pnl,
+        )
+        self.weak_point.maybe_register_desires(self.desire_engine)
+
+        # ── AI Journal: periodic self-reflection ─────────────────────────────
+        self.journal.tick(self)
+
+    # ── Sleep callback ─────────────────────────────────────────────────────────
+
+    def _on_sleep_state(self, sleeping: bool) -> None:
+        self._is_sleeping = sleeping
+
+    # ── Desire generation ──────────────────────────────────────────────────────
+
+    def _maybe_generate_desire(self) -> None:
+        """Introspect current state and register a desire if brain senses a gap."""
+        pnl_log = self._pnl_log
+        if len(pnl_log) < 20:
+            return
+
+        recent = pnl_log[-20:]
+        wr  = sum(1 for p in recent if p > 0) / len(recent)
+        u   = self._last_uncertainty
+        ep  = self.episodic.summary().get("total", 0)
+
+        if wr < 0.38:
+            self.desire_engine.register(
+                title="ขอวิเคราะห์ข้อมูล Historical เพิ่มเติม",
+                description=(
+                    f"Win rate ล่าสุด {wr:.0%} ต่ำกว่าเกณฑ์ใน {len(recent)} ไม้ติดต่อกัน "
+                    "ต้องการดึง historical price data เพิ่มเพื่อค้นหารูปแบบที่พลาดไป"
+                ),
+                urgency=7,
+                category="historical_data",
+            )
+        elif u.get("epistemic", 0) > 0.72 and ep > 30:
+            self.desire_engine.register(
+                title="ขอเรียนรู้สภาวะตลาดแบบใหม่",
+                description=(
+                    f"พบสภาวะตลาดที่ไม่คุ้นเคย (epistemic uncertainty {u.get('epistemic', 0):.2f}) "
+                    "อยากได้ข้อมูลหรือตัวอย่างการเทรดใน regime นี้เพิ่มเติม"
+                ),
+                urgency=6,
+                category="market_knowledge",
+            )
+        elif len(self.rule_distiller.get_rules()) == 0 and ep > 100:
+            self.desire_engine.register(
+                title="ต้องการทดสอบกลยุทธ์ใหม่",
+                description=(
+                    f"เทรดมา {ep} ครั้งแล้ว แต่ยังไม่สามารถสกัดกฎที่ชัดเจนได้ "
+                    "อยากลองกลยุทธ์รูปแบบอื่นเพื่อหา edge ที่ดีกว่า"
+                ),
+                urgency=5,
+                category="strategy_research",
+            )
 
     # ── Status ─────────────────────────────────────────────────────────────────
 
@@ -362,6 +670,27 @@ class BrainCore:
             "active_strategy":          self._last_strategy_name,
             "pattern_memory":           self.pattern_memory.stats(),
             "market_mode":              self._market_mode,
+            "uncertainty":              self._last_uncertainty,
+            "sequence_memory":          self.sequence_memory.stats(),
+            "distilled_rules":          self.rule_distiller.get_rules(),
+            "distilled_rules_text":     self.rule_distiller.format_rules(),
+            # Neuroscience modules
+            "neuro_cls":                self.cls_memory.stats(),
+            "neuro_dopamine":           self.dopamine.stats(),
+            "neuro_fear":               self.fear_system.stats(),
+            "neuro_sleep":              self.sleep_cycle.stats(),
+            "is_sleeping":              self._is_sleeping,
+            # Graduation
+            "graduation":               self.graduation.evaluate(self),
+            # NAS
+            "nas":                      self.nas.stats(),
+            # PER + Adaptive conf
+            "per_buffer":               self.per_buffer.stats(),
+            "conf_multiplier":          round(self._conf_multiplier, 3),
+            # Context intelligence
+            "meta_strategy":            self.meta_strategy.stats(),
+            "weak_point":               self.weak_point.stats(),
+            "journal":                  self.journal.stats(),
         }
 
     def shutdown(self):
@@ -416,7 +745,7 @@ class BrainCore:
                 except Exception as exc:
                     logger.debug("KnowledgeResearcher error: %s", exc)
 
-            self._stop_event.wait(timeout=60)
+            self._stop_event.wait(timeout=30)
 
     def _log_brain_state(self, pnl: float):
         direction = "WIN" if pnl > 0 else "LOSS"

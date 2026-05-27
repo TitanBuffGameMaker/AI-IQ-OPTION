@@ -1,19 +1,25 @@
 """
 CapitalGuard — เกราะป้องกันทุน สำหรับ REAL account เท่านั้น
 
-PRACTICE account: ทุก method คืนค่า default ปลอดภัย ไม่มีการหยุด
-REAL account: เปิดใช้งาน 4 ระบบป้องกัน
+PRACTICE account: ไม่มีการหยุดเลย — ยิ่งเทรดมาก ยิ่งเรียนรู้เร็ว
+  - OTC assets เป็นตลาดสังเคราะห์ที่ IQ Option สร้างขึ้น ไม่ใช่ตลาดจริง
+  - บัญชีทดลองไม่เสียเงินจริง → ให้ AI เทรดต่อเสมอ ไม่ว่าจะ loss มากแค่ไหน
+  - เป้าหมาย: สะสม trade experience ให้มากที่สุดเพื่อเรียนรู้ OTC patterns
 
-1. Daily Loss Limit   — หยุดวันนั้นทันทีถ้าขาดทุน > 20 % ของทุนต้นวัน
-2. Session Profit Target — หยุดเก็บกำไร ไม่โลภ ถ้าถึง +10 % ของทุนต้นวัน
+REAL account: เปิดใช้งาน 4 ระบบป้องกัน
+1. Daily Loss Limit   — หยุดวันนั้นทันทีถ้าขาดทุน > 20% ของทุนต้นวัน
+2. Session Profit Target — หยุดเก็บกำไร ไม่โลภ ถ้าถึง +10% ของทุนต้นวัน
 3. Kelly Criterion sizing — ปรับขนาด bet ให้เหมาะสมกับ win rate จริง
 4. Min Confidence (REAL) — threshold สูงกว่า PRACTICE เพื่อเทรดเฉพาะสัญญาณที่มั่นใจ
 
-ข้อมูลทั้งหมดคำนวณจากยอด balance ต้นวัน (reset ทุกเที่ยงคืน)
+หมายเหตุ OTC: ราคา OTC ไม่ตอบสนองต่อข่าวจริง (Fed, ECB ฯลฯ)
+  AI ต้องเรียนรู้ pattern เทคนิคของ OTC เอง ไม่ใช่จากข่าวพื้นฐาน
 """
 import logging
 import time
 from typing import Tuple
+
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
@@ -31,10 +37,11 @@ class CapitalGuard:
     KELLY_FRACTION        = 0.25   # ใช้ 25% ของ Full Kelly (safety margin)
 
     # ── Min confidence ตาม account + trade count ─────────────────────────────
-    #  PRACTICE: เริ่มต่ำ เพื่อให้ AI เรียนรู้ได้เยอะ
-    #  REAL: เริ่มสูงกว่า → เทรดเฉพาะเมื่อมั่นใจจริงๆ
-    _CONF_PRACTICE = [(0, 0.30), (20, 0.40), (50, 0.50)]
-    _CONF_REAL     = [(0, 0.55), (10, 0.58), (30, 0.62), (100, 0.65)]
+    #  PRACTICE: threshold ต่ำ — ต้องการ trade volume สูงเพื่อเรียนรู้ OTC patterns
+    #            บัญชีทดลองไม่เสียเงินจริง ยิ่งเทรดมาก ยิ่งเรียนรู้เร็ว
+    #  REAL:     threshold สูง — ป้องกันเงินจริง เทรดเฉพาะสัญญาณที่มั่นใจ
+    _CONF_PRACTICE = [(0, 0.33), (50, 0.38), (200, 0.43), (500, 0.48)]
+    _CONF_REAL     = [(0, 0.58), (10, 0.62), (30, 0.65), (100, 0.68)]
 
     def __init__(self, account_type: str = "PRACTICE"):
         self.account_type = (account_type or "PRACTICE").upper()
@@ -198,6 +205,26 @@ class CapitalGuard:
             if trades_done >= min_trades:
                 threshold = conf
         return threshold
+
+    def min_confidence_for_payout(self, trades_done: int, payout: float = 0.85) -> float:
+        """
+        Like min_confidence() but also considers the asset's actual payout.
+
+        For binary options:  break_even_WR = 1 / (1 + payout)
+          payout 0.80 → need > 55.6% WR
+          payout 0.86 → need > 53.8% WR
+
+        We add a 6% safety margin above break-even so the threshold
+        is always slightly tighter than the theoretical minimum.
+        The result is clipped to [base_threshold + 0.01, 0.90].
+        """
+        base = self.min_confidence(trades_done)
+        if payout <= 0:
+            return base
+        breakeven_wr  = 1.0 / (1.0 + float(payout))
+        safety_margin = 0.06
+        payout_floor  = float(np.clip(breakeven_wr + safety_margin, 0.30, 0.90))
+        return max(base, payout_floor)
 
     # ── Status for UI ─────────────────────────────────────────────────────────
 

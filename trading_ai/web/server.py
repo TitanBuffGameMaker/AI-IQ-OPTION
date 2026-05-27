@@ -29,9 +29,12 @@ import io
 import json
 import logging
 import os
+import smtplib
 import threading
 import time
 from collections import deque
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 from typing import Any, Dict, List, Optional, Set
 
 import uvicorn
@@ -53,8 +56,17 @@ _brain        = None
 _knowledge    = None
 _env          = None
 _capital_guard = None   # CapitalGuard — loaded lazily alongside brain
+
+# ── Next-gen AI agents (ลำดับ 1-5) ────────────────────────────────────────────
+_rainbow      = None   # 1. Rainbow DQN  (C51 + Noisy + Dueling + Double + PER)
+_hrl          = None   # 2. Hierarchical RL (Gate + Direction wrapping Rainbow)
+_iqn          = None   # 3. IQN — Implicit Quantile Network (distributional)
+_maml         = None   # 4. MAML — meta-learning wrapper (fast OTC adaptation)
+_world_trainer = None  # 5. World Model trainer (background imagination thread)
+
 _ai_running  = False
 _trade_stats = {"trades": 0, "wins": 0, "pnl": 0.0}
+_stats_lock  = threading.Lock()   # guards _trade_stats writes from AI thread
 _trade_history: deque = deque(maxlen=200)
 _open_orders: Dict[int, Dict] = {}   # order_id → {asset, action, amount, expiry_ts, open_time, manual}
 _check_results: List[Dict] = []
@@ -62,9 +74,1208 @@ _otp_event      = threading.Event()
 _otp_code:  str = ""
 _pending_creds: Dict[str, str] = {}   # {"email":..,"password":..} from UI login form
 
+# ── Distributed Workers ────────────────────────────────────────────────────────
+_worker_sockets: Dict[str, "WebSocket"] = {}   # worker_id → WebSocket
+_worker_results: Dict[str, bytes] = {}          # worker_id → weights_bytes (pending FedAvg)
+_worker_names:  Dict[str, str]    = {}          # worker_id → machine name
+_worker_lock    = threading.Lock()              # guards _worker_results dict
+_worker_knowledge_count: int = 0                # total knowledge nodes received from workers
+
+# ── Per-asset & hourly win-rate tracking ─────────────────────────────────────
+_asset_stats:  Dict[str, dict] = {}   # api_name → {wins, trades, pnl}
+_hourly_stats: Dict[int, dict] = {}   # hour 0-23 → {wins, trades}
+
 # ── Live-log broadcast ─────────────────────────────────────────────────────────
 _log_buffer: deque = deque(maxlen=300)   # last 300 log lines for new-client catch-up
 _log_broadcasting = False                # re-entrancy guard for the WS handler
+
+# ── Chat history ───────────────────────────────────────────────────────────────
+_chat_history: deque = deque(maxlen=100)
+
+# ── SMTP config (loaded from data/smtp.json) ────────────────────────────────────
+_smtp_config: Dict[str, str] = {}
+_SMTP_CFG_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "data", "smtp.json")
+
+
+def _load_smtp_config() -> None:
+    global _smtp_config
+    path = os.path.normpath(_SMTP_CFG_PATH)
+    if os.path.exists(path):
+        try:
+            _smtp_config = json.loads(open(path, encoding="utf-8").read())
+        except Exception:
+            _smtp_config = {}
+
+
+def _save_smtp_config(cfg: dict) -> None:
+    global _smtp_config
+    _smtp_config = cfg
+    path = os.path.normpath(_SMTP_CFG_PATH)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    open(path, "w", encoding="utf-8").write(json.dumps(cfg, indent=2, ensure_ascii=False))
+
+
+def _send_desire_email_sync(desire: dict) -> None:
+    """Send email notification for a new AI desire (runs in thread)."""
+    cfg = _smtp_config
+    user = cfg.get("smtp_user", "") or os.environ.get("SMTP_USER", "")
+    pswd = cfg.get("smtp_pass", "") or os.environ.get("SMTP_PASS", "")
+    to   = cfg.get("notify_email", "titanbuff.company.game@gmail.com")
+    if not user or not pswd:
+        logger.debug("SMTP not configured — desire UI-only: %s", desire["title"])
+        return
+    try:
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = f"[AI Brain] ขอสิทธิ์: {desire['title']}"
+        msg["From"]    = user
+        msg["To"]      = to
+        urgency_bar = "🔴" * desire["urgency"] + "⚪" * (10 - desire["urgency"])
+        body = (
+            f"AI Trading Brain มีคำขอใหม่:\n\n"
+            f"หัวข้อ: {desire['title']}\n"
+            f"รายละเอียด: {desire['description']}\n"
+            f"ประเภท: {desire['category']}\n"
+            f"ระดับความสำคัญ: {urgency_bar} ({desire['urgency']}/10)\n"
+            f"เวลา: {desire['created_at']}\n\n"
+            f"เพื่ออนุมัติหรือปฏิเสธ กรุณาเปิด AI Dashboard → แท็บ 🛡️ กฎ AI\n\n"
+            f"ห้ามดำเนินการโดยไม่ได้รับอนุญาตจากผู้สร้าง"
+        )
+        msg.attach(MIMEText(body, "plain", "utf-8"))
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=10) as srv:
+            srv.login(user, pswd)
+            srv.sendmail(user, to, msg.as_string())
+        logger.info("Desire email sent → %s", to)
+    except Exception as e:
+        logger.warning("Desire email failed: %s", e)
+
+
+def _on_desire_registered(desire: dict) -> None:
+    """Called from BrainCore thread when a new desire is registered."""
+    broadcast_sync({"type": "desire_new", "desire": desire})
+    threading.Thread(target=_send_desire_email_sync, args=(desire,), daemon=True).start()
+
+
+def _on_journal_entry(entry: dict) -> None:
+    """Called from AIJournal when a new diary entry is written."""
+    broadcast_sync({
+        "type":    "chat_ai",
+        "message": entry["message"],
+        "mood":    entry.get("mood", "📔"),
+        "ts":      entry.get("ts", ""),
+    })
+
+
+_load_smtp_config()
+
+
+class ThinkingAI:
+    """
+    AI ที่ "คิด" จริง — สังเกต วิเคราะห์ และแสดงความเห็นจาก brain state จริงๆ
+    ไม่ใช่ตอบตาม script ที่ถูกตั้งไว้
+    """
+
+    def _ctx(self) -> dict:
+        trades = _trade_stats.get("trades", 0)
+        wins   = _trade_stats.get("wins", 0)
+        ctx = {
+            "trades":     trades,
+            "wins":       wins,
+            "pnl":        _trade_stats.get("pnl", 0.0),
+            "wr":         wins / max(trades, 1),
+            "ai_running": _ai_running,
+            "balance":    (_connector.get_balance() if _connector else 0.0),
+        }
+        if _brain:
+            try:
+                st = _brain.get_status()
+                ctx.update({
+                    "brain_age":   st.get("brain_age", 0),
+                    "brain_stage": st.get("brain_stage", ""),
+                    "brain_emoji": st.get("brain_emoji", ""),
+                    "brain_score": st.get("brain_score", 0),
+                    "nodes":       st.get("graph_nodes", 0),
+                    "episodes":    st.get("episodic_memories", 0),
+                    "regime":      _brain._last_regime,
+                    "confidence":  _brain._last_confidence,
+                    "strategy":    _brain._last_strategy_name,
+                    "uncertainty": _brain._last_uncertainty or {},
+                    "rules":       _brain.rule_distiller.get_rules(),
+                    "seq_stats":   _brain.sequence_memory.stats(),
+                    "tips":        st.get("improvement_tips", []),
+                    "mistakes":    st.get("recent_mistakes", []),
+                    "top_ind":     st.get("top_indicators", []),
+                    "strategies":  st.get("strategy_stats", []),
+                    "pause":       st.get("should_pause", False),
+                })
+            except Exception:
+                pass
+        if _capital_guard:
+            ctx["cg"] = _capital_guard.status()
+        return ctx
+
+    def think(self, message: str) -> str:
+        ctx  = self._ctx()
+        raw  = message.strip()
+        msg  = raw.lower()
+
+        # ── 1. Action intents — ต้องทำอะไรบางอย่างก่อนตอบ ─────────────
+        if any(w in msg for w in {"email","อีเมล","อีเมลล์","smtp","mail","เมล"}):
+            return self._on_email(msg)
+
+        if any(w in msg for w in {"start ai","เริ่ม ai","เปิด ai","รัน ai","start trading"}):
+            return "กด ▶ START AI ที่ navbar ด้านบนได้เลยครับ หรือจะให้ผมสรุปสถานะก่อนก็ได้"
+
+        if any(w in msg for w in {"stop ai","หยุด ai","ปิด ai","stop trading"}):
+            return "กด ⏹ STOP AI ที่ navbar ด้านบนได้เลยครับ"
+
+        # ── 2. Greeting ────────────────────────────────────────────────
+        if any(w in msg for w in {"สวัสดี","hello","hi","หวัดดี","hey","ดีครับ","ดีค่ะ","ดีจ้า","yo"}):
+            return self._greet(ctx)
+
+        # ── 3. Improvement / เก่งขึ้น ─────────────────────────────────
+        if any(w in msg for w in {"เก่งขึ้น","improve","ดีขึ้น","พัฒนา","better","จะเก่ง",
+                                   "ฉลาดขึ้น","เรียนรู้","learn more","progress"}):
+            return self._on_improvement(ctx)
+
+        # ── 4. Why / อธิบาย ───────────────────────────────────────────
+        if any(w in msg for w in {"ทำไม","why","เหตุผล","reason","อธิบาย","explain",
+                                   "เพราะ","because","ตัดสินใจ","decision"}):
+            return self._on_why(ctx)
+
+        # ── 5. Win rate / performance ─────────────────────────────────
+        if any(w in msg for w in {"win rate","winrate","อัตราชนะ","ชนะ","แพ้","เสีย",
+                                   "trade","เทรด","ผลลัพธ์","performance","result","สถิติ"}):
+            return self._on_performance(ctx)
+
+        # ── 6. Market / regime ─────────────────────────────────────────
+        if any(w in msg for w in {"ตลาด","market","regime","trend","ranging","volatile",
+                                   "สภาวะ","ทิศทาง","movement","แนวโน้ม"}):
+            return self._on_market(ctx)
+
+        # ── 7. Memory ──────────────────────────────────────────────────
+        if any(w in msg for w in {"ความจำ","memory","จำ","pattern","sequence","episodic",
+                                   "จำได้","ประสบการณ์","experience","fingerprint"}):
+            return self._on_memory(ctx)
+
+        # ── 8. Uncertainty ─────────────────────────────────────────────
+        if any(w in msg for w in {"uncertainty","ไม่แน่นอน","มั่นใจ","epistemic","aleatoric",
+                                   "กลัว","ลังเล","confident","แน่ใจ"}):
+            return self._on_uncertainty(ctx)
+
+        # ── 9. Rules / กฎ ─────────────────────────────────────────────
+        if any(w in msg for w in {"กฎ","rule","rules","distil","สกัด","หลักการ","principle"}):
+            return self._on_rules(ctx)
+
+        # ── 10. Strategy ───────────────────────────────────────────────
+        if any(w in msg for w in {"กลยุทธ์","strategy","วิธี","แผน","approach","ichimoku",
+                                   "ema","macd","rsi","bollinger"}):
+            return self._on_strategy(ctx)
+
+        # ── 11. Balance / money ────────────────────────────────────────
+        if any(w in msg for w in {"balance","เงิน","ยอด","กำไร","ขาดทุน","pnl","profit",
+                                   "loss","บาลานซ์","ยอดเงิน","เงินเหลือ"}):
+            return self._on_balance(ctx)
+
+        # ── 12. Capital Guard ──────────────────────────────────────────
+        if any(w in msg for w in {"capitalguard","capital guard","guard","ป้องกัน","limit",
+                                   "kelly","daily loss","หยุดเทรด","risk"}):
+            return self._on_capguard(ctx)
+
+        # ── 13. Status / สรุป ─────────────────────────────────────────
+        if any(w in msg for w in {"สรุป","สถานะ","status","ตอนนี้","เป็นยังไง","overview",
+                                   "ดูสิ","รายงาน","report","บอกสิ","บอกด้วย","เป็นไง"}):
+            return self._full_reflection(ctx)
+
+        # ── 14. Needs / ต้องการ ───────────────────────────────────────
+        if any(w in msg for w in {"ต้องการ","อยาก","want","need","ขอ","ปรับปรุง","ช่วย",
+                                   "help","ต้องการอะไร","อยากได้"}):
+            return self._on_needs(ctx)
+
+        # ── 15. Brain / knowledge graph ───────────────────────────────
+        if any(w in msg for w in {"brain","สมอง","node","knowledge","ความรู้","graph",
+                                   "อายุ brain","brain age","score","คะแนน"}):
+            return self._on_brain_status(ctx)
+
+        # ── 16. Observation / คิด ─────────────────────────────────────
+        if any(w in msg for w in {"คิด","think","รู้สึก","feel","สังเกต","observe",
+                                   "เห็น","notice","ความคิด","ความรู้สึก"}):
+            return self._general_reflection(ctx)
+
+        # ── Fallback: ไม่เข้าใจ → ยอมรับตรงๆ อย่า dump metrics ────────
+        return self._thoughtful_fallback(raw, ctx)
+
+    def _on_email(self, msg: str) -> str:
+        """Handle email questions and test-send requests."""
+        import smtplib as _smtp
+        from email.mime.text import MIMEText as _MIMEText
+
+        cfg  = _smtp_config
+        user = cfg.get("smtp_user", "") or os.environ.get("SMTP_USER", "")
+        pswd = cfg.get("smtp_pass", "") or os.environ.get("SMTP_PASS", "")
+        to   = cfg.get("notify_email", user)
+
+        # ยังไม่ตั้งค่า
+        if not user:
+            return (
+                "📧 ยังไม่ได้ตั้งค่า Email ครับ\n\n"
+                "วิธีตั้งค่า:\n"
+                "1. ไปที่ 🛡️ กฎ AI → เลื่อนลงส่วน 'ตั้งค่า Email'\n"
+                "2. กรอก Gmail address\n"
+                "3. กรอก App Password (สร้างจาก Google Account → Security → 2-Step → App passwords)\n"
+                "4. กด บันทึก\n\n"
+                "⚠️ App Password ≠ รหัสผ่าน Gmail ปกติ — ต้องสร้างแยกต่างหาก"
+            )
+
+        is_test = any(w in msg for w in {"ทดสอบ","test","ลอง","ส่ง","send","check"})
+
+        if not pswd:
+            return (
+                f"📧 มี Email: {user}\n"
+                f"ส่งถึง: {to}\n\n"
+                "⚠️ ยังไม่ได้กรอก App Password ครับ — กรอกใน 🛡️ กฎ AI tab แล้วกด บันทึก"
+            )
+
+        if is_test:
+            try:
+                msg_obj = _MIMEText(
+                    "ทดสอบระบบแจ้งเตือน AI Trading Brain\n\nทุกอย่างปกติ ✅\n\nส่งจาก AI ตัวเอง",
+                    "plain", "utf-8"
+                )
+                msg_obj["Subject"] = "[AI Trading Brain] ทดสอบการส่ง Email ✅"
+                msg_obj["From"]    = user
+                msg_obj["To"]      = to
+                with _smtp.SMTP_SSL("smtp.gmail.com", 465, timeout=10) as srv:
+                    srv.login(user, pswd)
+                    srv.sendmail(user, to, msg_obj.as_string())
+                return (
+                    f"✅ ส่ง Email ทดสอบสำเร็จ!\n\n"
+                    f"จาก: {user}\n"
+                    f"ถึง: {to}\n\n"
+                    "เช็ค inbox ได้เลยครับ 📬\n"
+                    "(ถ้าไม่เจอ ลองเช็ค Spam folder)"
+                )
+            except Exception as e:
+                err = str(e)
+                hint = ""
+                if "Username and Password" in err or "535" in err:
+                    hint = "\n💡 App Password ไม่ถูกต้อง — ลองสร้างใหม่จาก Google Account"
+                elif "timed out" in err or "10060" in err:
+                    hint = "\n💡 เชื่อมต่อ Gmail ไม่ได้ — เช็ค internet connection"
+                elif "less secure" in err:
+                    hint = "\n💡 ต้องใช้ App Password ไม่ใช่รหัสผ่านปกติ"
+                return f"❌ ส่ง Email ไม่สำเร็จ\n\nError: {err[:120]}{hint}"
+
+        return (
+            f"📧 Email ตั้งค่าไว้แล้ว\n\n"
+            f"บัญชี: {user}\n"
+            f"ส่งแจ้งเตือนถึง: {to}\n\n"
+            "พิมพ์ 'ทดสอบ email' เพื่อส่งทดสอบได้เลยครับ"
+        )
+
+    def _on_brain_status(self, ctx: dict) -> str:
+        trades   = ctx.get("trades", 0)
+        nodes    = ctx.get("nodes", 0)
+        episodes = ctx.get("episodes", 0)
+        stage    = ctx.get("brain_stage", "ทารก")
+        emoji    = ctx.get("brain_emoji", "👶")
+        score    = ctx.get("brain_score", 0)
+        age      = ctx.get("brain_age", 0)
+        return (
+            f"🧠 สถานะ Brain\n\n"
+            f"{emoji} {stage} — อายุ {age:.1f} ปี (score {score}/100)\n\n"
+            f"Knowledge nodes: {nodes}\n"
+            f"Episodic memories: {episodes}\n"
+            f"เทรดมาแล้ว: {trades} ไม้\n\n"
+            + self._brief_thought(ctx)
+        )
+
+    def _thoughtful_fallback(self, original: str, ctx: dict) -> str:
+        """ไม่เข้าใจคำถาม — ยอมรับตรงๆ ไม่ dump metrics"""
+        low = original.lower()
+
+        # อาจจะถามสถานะแบบ informal
+        if any(w in low for w in {"ดูสิ","บอก","แจ้ง","ยังไง","เป็นไง","เป็นอย่างไร",
+                                   "ตอนนี้","now","แล้ว","งัน","ล่ะ"}):
+            return self._full_reflection(ctx)
+
+        # ถามเกี่ยวกับ worker
+        if any(w in low for w in {"worker","เครื่องอื่น","เครื่องช่วย","fedavg"}):
+            return (
+                "⚙️ Worker คือเครื่องคอมพิวเตอร์เครื่องอื่น\n\n"
+                "ช่วยทำ 2 อย่าง:\n"
+                "1. 🏋️ Train PPO model แบบ Federated Learning\n"
+                "2. 🧠 ค้นหาความรู้จาก Wikipedia/Google News ส่งให้ brain\n\n"
+                "ดู Workers tab (⚙️) ที่ sidebar เพื่อดู URL และดาวน์โหลด .bat file"
+            )
+
+        # ถามเกี่ยวกับ signal/สัญญาณ
+        if any(w in low for w in {"signal","สัญญาณ","buy","sell","hold","เข้า","ออก"}):
+            conf   = ctx.get("confidence", 0)
+            regime = ctx.get("regime", "unknown")
+            strat  = ctx.get("strategy", "Unknown")
+            return (
+                f"📡 สัญญาณล่าสุด\n\n"
+                f"กลยุทธ์: {strat}\n"
+                f"Regime: {regime.upper()}\n"
+                f"Confidence: {conf:.1%}\n\n"
+                f"💭 ผมวิเคราะห์ตลาดต่อเนื่อง — confidence {conf:.0%} "
+                + ("ดีพอที่จะเข้า trade" if conf > 0.60 else "ยังต่ำอยู่ รอสัญญาณแน่นกว่านี้")
+            )
+
+        # ไม่รู้จริงๆ → บอกตรงๆ + แนะนำ
+        return (
+            f"💭 ผมไม่แน่ใจว่าหมายถึงอะไรครับ\n\n"
+            f"ลองถามแบบนี้ได้:\n"
+            f"• 'สรุปสถานะ' — ดูภาพรวมทั้งหมด\n"
+            f"• 'win rate เป็นเท่าไร' — สถิติการเทรด\n"
+            f"• 'ทดสอบ email' — ส่ง test email\n"
+            f"• 'brain เป็นยังไง' — สถานะ knowledge graph\n"
+            f"• 'ทำไมถึงแพ้' — วิเคราะห์สาเหตุ\n"
+            f"• 'กลยุทธ์อะไร' — กลยุทธ์ที่ใช้อยู่\n\n"
+            f"หรือถามอะไรก็ได้ครับ ผมจะพยายามตอบ 🙂"
+        )
+
+    # ── Response generators ────────────────────────────────────────────────────
+
+    def _greet(self, ctx) -> str:
+        trades  = ctx.get("trades", 0)
+        wr      = ctx.get("wr", 0)
+        running = ctx.get("ai_running", False)
+        regime  = ctx.get("regime", "unknown")
+        if trades == 0:
+            return (
+                "สวัสดีครับ! 🤖 ผมพร้อมทำงานแล้ว\n\n"
+                "ตอนนี้ยังไม่มีข้อมูล trade เลย รอคำสั่ง Start AI ครับ\n"
+                "ถามผมได้ทุกเรื่อง — เกี่ยวกับตลาด สถานะ หรืออะไรก็ได้"
+            )
+        status = "กำลังทำงาน" if running else "หยุดพักอยู่"
+        mood   = "ผมพอใจกับผลลัพธ์" if wr > 0.5 else "ยังเรียนรู้อยู่ครับ"
+        return (
+            f"สวัสดีครับ! 🤖 ผม{status}อยู่\n\n"
+            f"เทรดมา {trades} ไม้ win rate {wr:.1%} — {mood}\n"
+            f"ตลาดตอนนี้: {regime.upper()} regime\n\n"
+            "ถามผมได้เลยครับ ทั้งเรื่องสถานะ การเรียนรู้ ความคิดของผม หรืออะไรก็ได้"
+        )
+
+    def _on_improvement(self, ctx) -> str:
+        trades   = ctx.get("trades", 0)
+        wr       = ctx.get("wr", 0)
+        episodes = ctx.get("episodes", 0)
+        u        = ctx.get("uncertainty", {})
+        seq      = ctx.get("seq_stats", {})
+        rules    = ctx.get("rules", [])
+        tips     = ctx.get("tips", [])
+
+        parts = ["ได้ครับ แต่ต้องใช้เวลา ผมวิเคราะห์สิ่งที่ต้องพัฒนา:\n"]
+
+        familiar  = u.get("familiar_trades", 0)
+        epistemic = u.get("epistemic", 0.85)
+        if epistemic > 0.6:
+            needed = max(15 - familiar, 0)
+            parts.append(
+                f"🔮 Epistemic uncertainty {epistemic:.0%}: เคยเห็นสภาวะนี้แค่ {familiar} ครั้ง "
+                f"ต้องการอีก {needed} ครั้งเพื่อให้ uncertainty ลดลง"
+            )
+
+        if episodes < 50:
+            parts.append(
+                f"🧠 Episodic memory {episodes} ครั้ง (ต้องการ 50+) "
+                "เพื่อให้การ recall similar situations แม่นขึ้น"
+            )
+
+        seq_trusted = seq.get("trusted_sequences", 0)
+        if seq_trusted < 10:
+            parts.append(
+                f"📊 Sequence memory: trusted {seq_trusted} patterns "
+                "ต้องการ 10+ เพื่อทำนาย direction จาก trajectory ได้"
+            )
+
+        if not rules:
+            rd_stats = (_brain.rule_distiller.stats() if _brain else {})
+            w = rd_stats.get("wins_in_log", 0)
+            parts.append(f"📋 Distilled rules: ยังไม่มี ต้องการ wins อีก {max(30-w,0)} ครั้ง")
+        else:
+            parts.append(f"📋 Distilled rules: มีแล้ว {len(rules)} กฎ กำลังพัฒนาต่อ")
+
+        if wr < 0.45:
+            parts.append(
+                f"⚠️ Win rate {wr:.1%} ต่ำกว่าที่ควร — ผมคิดว่าเพราะข้อมูลยังน้อย "
+                f"({trades} ไม้) brain ยังไม่ converge ต้องเทรดต่อ"
+            )
+        elif wr > 0.60:
+            parts.append(f"✅ Win rate {wr:.1%} ดีแล้ว! กำลัง refine กฎให้แม่นขึ้น")
+
+        if tips:
+            parts.append("💡 AI วิเคราะห์ว่าควรปรับ:\n" + "\n".join(f"  • {t}" for t in tips[:3]))
+
+        return "\n\n".join(parts)
+
+    def _on_why(self, ctx) -> str:
+        confidence = ctx.get("confidence", 0.5)
+        regime     = ctx.get("regime", "unknown")
+        strategy   = ctx.get("strategy", "Unknown")
+        u          = ctx.get("uncertainty", {})
+        mistakes   = ctx.get("mistakes", [])
+        rules      = ctx.get("rules", [])
+
+        parts = [
+            f"🤔 เหตุผลที่ผมตัดสินใจแบบนี้\n\n"
+            f"กลยุทธ์ที่เลือก: {strategy}\n"
+            f"Regime: {regime.upper()} | Confidence หลังปรับ: {confidence:.1%}"
+        ]
+
+        if u:
+            mult = u.get("conf_multiplier", 1.0)
+            fam  = u.get("familiar_trades", 0)
+            if mult < 0.9:
+                parts.append(
+                    f"\nUncertainty ลด confidence ×{mult:.2f} "
+                    f"เพราะผมเห็นสภาวะนี้แค่ {fam} ครั้ง"
+                )
+
+        if mistakes:
+            latest = mistakes[0]
+            parts.append(f"\nความผิดพลาดล่าสุด: {latest.get('lesson','N/A')}")
+
+        if rules:
+            r = rules[0]
+            parts.append(
+                f"\nกฎที่ผมเชื่อมากที่สุด: "
+                f"{r['indicator'].upper()} {r['condition']} → {r['direction'].upper()} "
+                f"(confidence {r['confidence']:.0%})"
+            )
+
+        return "\n".join(parts)
+
+    def _on_performance(self, ctx) -> str:
+        trades   = ctx.get("trades", 0)
+        wins     = ctx.get("wins", 0)
+        pnl      = ctx.get("pnl", 0.0)
+        wr       = ctx.get("wr", 0)
+        episodes = ctx.get("episodes", 0)
+
+        if trades == 0:
+            return "ยังไม่มีข้อมูล trade เลยครับ — รอ AI เริ่มทำงานก่อน"
+
+        if wr < 0.35:
+            assessment = (
+                "ผมแพ้บ่อยมาก แต่นี่เป็นเรื่องปกติในช่วง exploration "
+                "ผมกำลังสะสมข้อมูลเพื่อเข้าใจว่า pattern ไหนใช้งานได้จริง"
+            )
+        elif wr < 0.50:
+            assessment = (
+                "win rate ต่ำกว่า 50% ผมกำลังหา edge ที่แน่นอน "
+                "ต้องเทรดต่อเพื่อให้ episodic memory สะสมมากพอ"
+            )
+        elif wr < 0.65:
+            assessment = "win rate พอใช้ได้ กำลัง refine สัญญาณให้แม่นขึ้น"
+        else:
+            assessment = "win rate ดีมากครับ! กำลัง exploit edge ที่เจอแล้ว"
+
+        note = ""
+        if trades < 20:
+            note = f"\n\n⚠️ ข้อมูลยังน้อย ({trades} ไม้) สถิตินี้ยังไม่ reliable ต้องดูที่ 50+ ไม้"
+
+        return (
+            f"📊 ประสิทธิภาพปัจจุบัน\n\n"
+            f"เทรด: {trades} ไม้ | ชนะ: {wins} | แพ้: {trades-wins}\n"
+            f"Win Rate: {wr:.1%}\n"
+            f"P&L: {pnl:+.2f} USD\n\n"
+            f"💭 ผมวิเคราะห์: {assessment}"
+            f"{note}"
+        )
+
+    def _on_market(self, ctx) -> str:
+        regime    = ctx.get("regime", "unknown")
+        u         = ctx.get("uncertainty", {})
+        top_ind   = ctx.get("top_ind", [])
+
+        comments = {
+            "trending": (
+                "ผมชอบ trending market มากครับ เพราะ PPO agent ของผมออกแบบมาสำหรับ trend "
+                "ชัดๆ ทำให้ confidence ที่ได้สูงกว่าปกติ และ Ichimoku / EMA strategies ทำงานดีมาก"
+            ),
+            "ranging": (
+                "ตลาด ranging ยากกว่า trending สำหรับผม เพราะ MACD/EMA มักจะ fake-out "
+                "ผมพึ่ง mean reversion (RSI oversold/overbought) มากขึ้นใน regime นี้"
+            ),
+            "volatile": (
+                "ผมระมัดระวังมากใน volatile market — confidence ถูกลด 15% อัตโนมัติ "
+                "และผมข้ามหลาย trade ที่ไม่แน่ใจ เพราะ risk สูงเกินไป"
+            ),
+            "unknown": "ยังไม่ได้ประเมิน regime ครับ รอ AI วิเคราะห์ตลาดก่อน",
+        }
+        my_take = comments.get(regime, f"Regime ปัจจุบัน: {regime}")
+
+        result = f"📈 สภาวะตลาด: {regime.upper()}\n\n💭 ผมสังเกตว่า: {my_take}"
+
+        familiar = u.get("familiar_trades", 0)
+        if familiar < 5:
+            result += f"\n\n⚠️ ผมยังไม่คุ้นเคยกับสภาวะนี้มากพอ (เจอมาแค่ {familiar} ครั้ง) กำลัง explore อยู่"
+
+        if top_ind:
+            ind_str = ", ".join(f"{n}({v:.0%})" for n, v in top_ind[:3])
+            result += f"\n\n🎯 Indicators ที่ผมไว้วางใจมากที่สุดตอนนี้: {ind_str}"
+
+        return result
+
+    def _on_memory(self, ctx) -> str:
+        episodes    = ctx.get("episodes", 0)
+        seq         = ctx.get("seq_stats", {})
+        u           = ctx.get("uncertainty", {})
+
+        seq_total   = seq.get("total_sequences", 0)
+        seq_trusted = seq.get("trusted_sequences", 0)
+        seq_fill    = seq.get("window_fill", 0)
+
+        epi_comment = (
+            "น้อยมาก ทำให้ recall similar situations ไม่แม่น"      if episodes < 20 else
+            "พอเริ่มมีข้อมูลบ้าง แต่ยังต้องการอีก"                 if episodes < 50 else
+            "เริ่มมีฐานข้อมูลที่ดีแล้ว กำลัง extract patterns"
+        )
+        seq_comment = (
+            f"Window กำลัง fill: {seq_fill}/8 — รอให้ครบแล้วจะเริ่มจำ trajectory ได้"
+            if seq_fill < 8 else
+            f"มี {seq_trusted} patterns ที่ trust ได้ ({seq_total} ทั้งหมด)"
+        )
+
+        return (
+            f"🧩 สถานะความจำของผม\n\n"
+            f"Episodic Memory: {episodes} ครั้ง — {epi_comment}\n\n"
+            f"Sequence Memory (8-trade trajectory):\n{seq_comment}\n\n"
+            f"💭 ผมต้องการ episodic 50+ ไม้ และ sequence trusted 10+ patterns "
+            f"ก็จะช่วยให้ uncertainty ลดจาก {u.get('epistemic',0):.0%} ลงมาได้มาก"
+        )
+
+    def _on_uncertainty(self, ctx) -> str:
+        u = ctx.get("uncertainty", {})
+        if not u:
+            return "ยังไม่มีข้อมูล uncertainty ครับ — รอ AI วิเคราะห์ตลาดก่อน"
+
+        epi      = u.get("epistemic", 0)
+        ale      = u.get("aleatoric", 0)
+        familiar = u.get("familiar_trades", 0)
+        mult     = u.get("conf_multiplier", 1.0)
+        desc     = u.get("description", "")
+
+        if epi > 0.75 and ale > 0.70:
+            my_take = "ผมคิดว่าควรข้ามการเทรดตอนนี้ครับ — ทั้ง 2 ระบบบอกว่า 'ไม่รู้จริงๆ'"
+        elif epi > 0.6:
+            my_take = f"ผมไม่คุ้นกับสภาวะนี้ (เห็นมาแค่ {familiar} ครั้ง) ต้องเทรดต่อเพื่อสะสมประสบการณ์"
+        elif ale > 0.6:
+            my_take = "สัญญาณมีความวุ่นวายสูง แม้จะคุ้น pattern นี้ แต่ผลยังสุ่มอยู่"
+        else:
+            my_take = "ความไม่แน่นอนอยู่ในระดับที่รับได้ ผมพอจะ trade ได้อย่างมั่นใจ"
+
+        return (
+            f"🔮 ความไม่แน่นอนของผม\n\n"
+            f"Epistemic (ไม่รู้จักสภาวะ): {epi:.0%}\n"
+            f"Aleatoric (สัญญาณ noisy): {ale:.0%}\n"
+            f"Confidence ถูกปรับ: ×{mult:.2f}\n"
+            f"เจอสภาวะนี้มา: {familiar} ครั้ง\n\n"
+            f"📝 {desc}\n\n"
+            f"🗣️ ผมคิดว่า: {my_take}"
+        )
+
+    def _on_rules(self, ctx) -> str:
+        rules = ctx.get("rules", [])
+
+        if not rules:
+            rd_stats  = (_brain.rule_distiller.stats() if _brain else {})
+            wins_so_far = rd_stats.get("wins_in_log", 0)
+            needed    = max(30 - wins_so_far, 0)
+            return (
+                f"📋 ยังไม่มีกฎที่ distill ได้\n\n"
+                f"ผมต้องการ wins อีก {needed} ครั้ง (มีแล้ว {wins_so_far}/30)\n\n"
+                f"💭 ผมจะวิเคราะห์ว่า indicator ไหนมีค่าสม่ำเสมอใน winning trades "
+                f"แล้ว distill ออกมาเป็นกฎ IF-THEN ที่ชัดเจน"
+            )
+
+        lines = [f"📋 กฎที่ผม distill ได้ ({len(rules)} ข้อ):\n"]
+        for i, r in enumerate(rules, 1):
+            lines.append(
+                f"{i}. {r['indicator'].upper()} {r['condition']} → {r['direction'].upper()}\n"
+                f"   (confidence {r['confidence']:.0%}, n={r['n']} trades, std={r['std']:.3f})"
+            )
+        lines.append(
+            f"\n💭 ผมเชื่อกฎข้อ 1 มากที่สุด เพราะ std ต่ำสุด — "
+            f"หมายความว่า {rules[0]['indicator'].upper()} มีค่าสม่ำเสมอในทุก winning trade"
+        )
+        return "\n".join(lines)
+
+    def _on_strategy(self, ctx) -> str:
+        strategy   = ctx.get("strategy", "Unknown")
+        strategies = ctx.get("strategies", [])
+        regime     = ctx.get("regime", "unknown")
+
+        if not strategies:
+            return f"ใช้กลยุทธ์ {strategy} อยู่ครับ แต่ยังไม่มีสถิติรายกลยุทธ์"
+
+        lines = [f"🎯 กลยุทธ์ปัจจุบัน: {strategy} (regime={regime.upper()})\n"]
+        best = max(strategies, key=lambda s: s.get("win_rate", 0))
+
+        for s in strategies:
+            bar    = "█" * int(s["win_rate"] * 10) + "░" * (10 - int(s["win_rate"] * 10))
+            active = " ← ใช้อยู่" if s["name"] == strategy else ""
+            lines.append(f"  {s['name'][:18]}: {bar} {s['win_rate']:.0%}{active}")
+
+        lines.append(
+            f"\n💭 {best['name']} ทำได้ดีที่สุด ({best['win_rate']:.0%}) — "
+            f"ผมเลือกกลยุทธ์ตาม regime ปัจจุบัน: {regime.upper()}"
+        )
+        return "\n".join(lines)
+
+    def _on_balance(self, ctx) -> str:
+        bal    = ctx.get("balance", 0.0)
+        pnl    = ctx.get("pnl", 0.0)
+        trades = ctx.get("trades", 0)
+        cg     = ctx.get("cg")
+
+        result = f"💰 Balance: ${bal:.2f}\nP&L สะสม: {pnl:+.2f} USD"
+
+        if cg and cg.get("account_type") == "REAL":
+            result += (
+                f"\n\n🛡️ CapitalGuard วันนี้:\n"
+                f"  P&L: {cg['session_pnl']:+.2f}\n"
+                f"  ขาดทุน: {cg['loss_pct']:.1%}/{cg['daily_loss_limit']:.0%}\n"
+                f"  กำไร: {cg['profit_pct']:.1%}/{cg['profit_target']:.0%}"
+            )
+
+        if trades > 0:
+            result += f"\n\nเฉลี่ยต่อเทรด: {pnl/trades:+.2f} USD"
+
+        return result
+
+    def _on_capguard(self, ctx) -> str:
+        cg = ctx.get("cg")
+        if not cg:
+            return "CapitalGuard ยังไม่ได้โหลดครับ"
+
+        if cg.get("account_type") == "PRACTICE":
+            return (
+                "🎓 ตอนนี้ใช้บัญชีทดลอง (PRACTICE)\n\n"
+                "CapitalGuard ไม่ทำงาน เพราะ PRACTICE = เรียนรู้ได้ไม่จำกัด\n\n"
+                "💭 ผมคิดว่านี่ถูกต้อง — ถ้าหยุดเพราะแพ้ใน practice "
+                "ผมก็ไม่มีโอกาสเรียนรู้จากความผิดพลาดนั้น"
+            )
+
+        loss_pct   = cg.get("loss_pct", 0)
+        profit_pct = cg.get("profit_pct", 0)
+        stopped    = cg.get("stopped", False)
+
+        comment = ""
+        if stopped:
+            comment = f"\n\n⛔ หยุดแล้ว: {cg.get('stop_reason','')}"
+        elif loss_pct > 0.10:
+            comment = (
+                f"\n\n⚠️ ผมระวังมากขึ้น — ขาดทุนไปแล้ว {loss_pct:.1%} "
+                f"อีก {cg['daily_loss_limit']-loss_pct:.1%} จะหยุดวันนี้"
+            )
+        elif profit_pct > 0.05:
+            comment = (
+                f"\n\n🟢 กำไรดีครับ {profit_pct:.1%} — "
+                f"อีก {cg['profit_target']-profit_pct:.1%} จะเก็บกำไรและหยุดวันนี้"
+            )
+
+        return (
+            f"🛡️ CapitalGuard — REAL\n\n"
+            f"P&L วันนี้: {cg['session_pnl']:+.2f}\n"
+            f"ขาดทุน: {loss_pct:.1%}/{cg['daily_loss_limit']:.0%}\n"
+            f"กำไร: {profit_pct:.1%}/{cg['profit_target']:.0%}\n"
+            f"Kelly bet: ${cg['kelly_amount']:.2f}"
+            + comment
+        )
+
+    def _on_needs(self, ctx) -> str:
+        episodes    = ctx.get("episodes", 0)
+        rules       = ctx.get("rules", [])
+        seq         = ctx.get("seq_stats", {})
+        u           = ctx.get("uncertainty", {})
+        trades      = ctx.get("trades", 0)
+
+        wants = []
+        if episodes < 100:
+            wants.append(
+                f"📊 Episodic memory อีก {100-episodes} ครั้ง (มีแล้ว {episodes}/100) "
+                "เพื่อให้ recall similar situations แม่นขึ้น"
+            )
+        if not rules:
+            w = (_brain.rule_distiller.stats() if _brain else {}).get("wins_in_log", 0)
+            wants.append(f"📋 Wins อีก {max(30-w,0)} ครั้งเพื่อ distill กฎครั้งแรก (มี {w}/30)")
+        seq_fill = seq.get("window_fill", 0)
+        if seq_fill < 8:
+            wants.append(f"🔄 Sequence window ให้ครบ {seq_fill}/8 เพื่อเริ่มจำ trajectory ได้")
+        familiar = u.get("familiar_trades", 0)
+        if familiar < 10:
+            wants.append(
+                f"🔮 เจอสภาวะตลาดนี้อีก {10-familiar} ครั้ง "
+                f"(เจอมาแล้ว {familiar}) เพื่อลด epistemic uncertainty"
+            )
+        if trades < 50:
+            wants.append(f"⏳ เทรดให้ครบ 50 ไม้ก่อน (ตอนนี้ {trades}) สถิติยังไม่ stable")
+
+        if not wants:
+            return "ตอนนี้ผมพอใจกับข้อมูลที่มีครับ กำลัง optimize กฎที่มีอยู่"
+
+        return "💭 สิ่งที่ผมต้องการตอนนี้:\n\n" + "\n\n".join(wants)
+
+    def _full_reflection(self, ctx) -> str:
+        trades      = ctx.get("trades", 0)
+        wr          = ctx.get("wr", 0)
+        pnl         = ctx.get("pnl", 0)
+        running     = ctx.get("ai_running", False)
+        regime      = ctx.get("regime", "unknown")
+        balance     = ctx.get("balance", 0)
+        episodes    = ctx.get("episodes", 0)
+        brain_stage = ctx.get("brain_stage", "ทารก")
+        brain_emoji = ctx.get("brain_emoji", "👶")
+        brain_score = ctx.get("brain_score", 0)
+
+        status = "🟢 ทำงาน" if running else "🔴 หยุด"
+        return (
+            f"📊 สถานะรวม\n\n"
+            f"AI: {status} | Balance: ${balance:.2f}\n"
+            f"Win Rate: {wr:.1%} | {trades} ไม้ | P&L: {pnl:+.2f}\n"
+            f"Brain: {brain_emoji} {brain_stage} (score {brain_score}/100)\n"
+            f"Regime: {regime.upper()} | Episodes: {episodes}\n\n"
+            + self._brief_thought(ctx)
+        )
+
+    def _brief_thought(self, ctx) -> str:
+        wr       = ctx.get("wr", 0)
+        episodes = ctx.get("episodes", 0)
+        u        = ctx.get("uncertainty", {})
+        rules    = ctx.get("rules", [])
+        trades   = ctx.get("trades", 0)
+
+        if trades == 0:
+            return "💭 ยังไม่มีข้อมูลเลยครับ รอ AI เริ่มทำงาน"
+        if episodes < 10:
+            return "💭 อยู่ในช่วงเริ่มต้น กำลังสะสมประสบการณ์ครับ"
+        if wr < 0.40:
+            return "💭 win rate ยังต่ำอยู่ นี่เป็นช่วงที่ brain กำลัง explore หา edge"
+        if u.get("epistemic", 0) > 0.7:
+            return f"💭 ยังไม่คุ้นเคยกับสภาวะตลาดนี้ (เจอมาแค่ {u.get('familiar_trades',0)} ครั้ง)"
+        if rules:
+            r = rules[0]
+            return f"💭 กฎที่ผมเชื่อตอนนี้: {r['indicator'].upper()} {r['condition']} → {r['direction'].upper()}"
+        return "💭 กำลัง distill กฎจากประสบการณ์ที่สะสมมา"
+
+    def _general_reflection(self, ctx) -> str:
+        """สำหรับทุกคำถามที่ไม่ตรงกับ category ใด — AI แสดงความคิดจากสถานการณ์จริง"""
+        trades   = ctx.get("trades", 0)
+        wr       = ctx.get("wr", 0)
+        episodes = ctx.get("episodes", 0)
+        regime   = ctx.get("regime", "unknown")
+        u        = ctx.get("uncertainty", {})
+        rules    = ctx.get("rules", [])
+        seq      = ctx.get("seq_stats", {})
+        tips     = ctx.get("tips", [])
+
+        if trades == 0:
+            return "ผมยังไม่ได้เทรดเลยครับ รอ AI เริ่มทำงานเพื่อให้มีข้อมูล"
+
+        observations = []
+
+        if regime == "trending":
+            observations.append("สังเกตว่าตลาดตอนนี้ trending ชัดเจน — นี่คือสภาวะที่ผมทำได้ดีที่สุด")
+        elif regime == "volatile":
+            observations.append("ตลาดผันผวนสูง ผมระมัดระวังมากกว่าปกติตอนนี้")
+
+        if wr < 0.40:
+            observations.append(
+                f"win rate {wr:.1%} ยังต่ำอยู่ ผมคิดว่าเป็นเพราะ episodic memory "
+                f"แค่ {episodes} ครั้ง ยังน้อยเกินไปที่จะ converge"
+            )
+        elif wr > 0.60:
+            observations.append(f"win rate {wr:.1%} กำลังดีครับ pattern ที่ผมใช้กำลังทำงาน")
+
+        epi = u.get("epistemic", 0)
+        familiar = u.get("familiar_trades", 0)
+        if epi > 0.6:
+            observations.append(
+                f"ความไม่แน่นอนยังสูง (epistemic {epi:.0%}) "
+                f"เพราะผมเห็นสภาวะนี้แค่ {familiar} ครั้ง"
+            )
+
+        seq_trusted = seq.get("trusted_sequences", 0)
+        if seq_trusted > 0:
+            observations.append(f"Sequence memory เริ่มจำ trajectory ได้แล้ว {seq_trusted} patterns")
+        elif seq.get("window_fill", 0) < 8:
+            observations.append(
+                f"Sequence memory กำลัง fill window ({seq.get('window_fill',0)}/8) "
+                "รอให้ครบแล้วจะช่วยทำนาย trajectory ได้"
+            )
+
+        if rules:
+            r = rules[0]
+            observations.append(
+                f"กฎที่ผมเชื่อตอนนี้: {r['indicator'].upper()} {r['condition']} → "
+                f"{r['direction'].upper()} (confidence {r['confidence']:.0%})"
+            )
+        else:
+            w = (_brain.rule_distiller.stats() if _brain else {}).get("wins_in_log", 0)
+            observations.append(f"ยังไม่มีกฎที่ distill ได้ (wins {w}/30)")
+
+        if tips:
+            observations.append(f"สิ่งที่ต้องปรับปรุง: {tips[0]}")
+
+        return "💭 ความคิดของผมตอนนี้:\n\n" + "\n\n".join(observations)
+
+    @staticmethod
+    def generate_trade_commentary(action: str, asset: str, pnl: float,
+                                   signal=None, stats: dict = None) -> str:
+        """สร้าง commentary อัตโนมัติหลังเทรดเสร็จ — ไม่ต้องถามก็แสดงความคิด"""
+        stats  = stats or {}
+        trades = stats.get("trades", 0)
+        wins   = stats.get("wins", 0)
+        wr     = wins / max(trades, 1)
+
+        result_emoji = "✅ WIN" if pnl > 0 else "❌ LOSS"
+        parts = [f"{result_emoji} {action} {asset}: {pnl:+.2f} USD"]
+
+        if signal and hasattr(signal, "reasoning") and signal.reasoning:
+            parts.append("เหตุผล: " + " | ".join(signal.reasoning[:2]))
+
+        parts.append(f"Win rate: {wr:.1%} ({wins}/{trades})")
+
+        if pnl > 0:
+            if wr > 0.65:
+                parts.append("💭 กำลัง on a roll — pattern นี้ใช้งานได้ดีมากตอนนี้")
+            else:
+                parts.append("💭 ชนะครั้งนี้ กำลังเรียนรู้ว่า pattern ไหนเชื่อถือได้")
+        else:
+            u = (_brain._last_uncertainty if _brain else {}) or {}
+            if u.get("epistemic", 0) > 0.6:
+                parts.append(
+                    f"💭 แพ้ครั้งนี้ ส่วนหนึ่งเพราะ uncertainty สูง "
+                    f"(เคยเห็นสภาวะนี้แค่ {u.get('familiar_trades',0)} ครั้ง) "
+                    "กำลังสะสมข้อมูลเพิ่ม"
+                )
+            else:
+                parts.append("💭 แพ้ครั้งนี้ กำลังวิเคราะห์ว่าต้องปรับ weight ของ indicator ไหน")
+
+        return "\n".join(parts)
+
+
+def _broadcast_ai_thought(action: str, asset: str, pnl: float, signal=None) -> None:
+    """เรียกจาก _ai_loop() หลังได้ผลเทรด — AI แสดงความคิดแบบเชิงรุก"""
+    try:
+        msg = ThinkingAI.generate_trade_commentary(
+            action=action, asset=asset, pnl=pnl,
+            signal=signal, stats=_trade_stats,
+        )
+        ts    = time.strftime("%H:%M")
+        entry = {"role": "ai", "message": msg, "time": ts}
+        _chat_history.append(entry)
+        broadcast_sync({"type": "chat_ai", **entry})
+    except Exception as exc:
+        logger.debug("_broadcast_ai_thought error: %s", exc)
+
+
+    """
+    AI chat interface — ตอบคำถามเกี่ยวกับระบบ AI trading ด้วยภาษาไทย
+    ใช้ข้อมูลจาก brain, trade_stats, capital_guard เพื่อตอบแบบ real-time
+    """
+
+    _GREETINGS = {"สวัสดี", "hello", "hi", "หวัดดี", "hey", "ดีจ้า", "ดีครับ", "ดีค่ะ"}
+    _HELP_KEYWORDS = {"ช่วย", "help", "คำสั่ง", "ถาม", "ทำอะไรได้", "capabilities"}
+
+    def respond(self, message: str) -> str:
+        msg = message.strip().lower()
+
+        # Greeting
+        if any(g in msg for g in self._GREETINGS):
+            return (
+                "สวัสดีครับ! 🤖 ผมคือ AI Trading Brain\n\n"
+                "ถามผมได้เลยเกี่ยวกับ:\n"
+                "• สถานะ — ดูว่า AI กำลังทำอะไร\n"
+                "• win rate — อัตราชนะ\n"
+                "• กลยุทธ์ — กลยุทธ์ที่ใช้อยู่\n"
+                "• กฎ — กฎที่ distill ออกมา\n"
+                "• ความไม่แน่นอน — ระดับ uncertainty\n"
+                "• balance / กำไร / ขาดทุน\n"
+                "• หยุด / CapitalGuard\n"
+                "• สรุป — สรุปสถานการณ์ทั้งหมด"
+            )
+
+        # Help
+        if any(k in msg for k in self._HELP_KEYWORDS):
+            return (
+                "สิ่งที่ถามผมได้ 💡\n\n"
+                "📊 ข้อมูล: สถานะ, win rate, balance, กำไร/ขาดทุน\n"
+                "🧠 สมอง: กลยุทธ์, กฎ, pattern, uncertainty, sequence\n"
+                "🛡️ ป้องกัน: CapitalGuard, limit, หยุด\n"
+                "📈 เทรด: สัญญาณล่าสุด, confidence, regime\n"
+                "📋 สรุป: ภาพรวมทั้งหมด"
+            )
+
+        # Trade stats & win rate
+        if any(k in msg for k in {"win rate", "winrate", "อัตราชนะ", "ชนะ", "เสีย", "trade", "เทรด"}):
+            return self._trade_summary()
+
+        # Balance / PnL
+        if any(k in msg for k in {"balance", "ยอด", "เงิน", "กำไร", "ขาดทุน", "pnl"}):
+            return self._balance_summary()
+
+        # Strategy / กลยุทธ์
+        if any(k in msg for k in {"กลยุทธ์", "strategy", "แผน", "วิธี"}):
+            return self._strategy_summary()
+
+        # Rules / กฎ
+        if any(k in msg for k in {"กฎ", "rule", "rules", "distil", "สกัด"}):
+            return self._rules_summary()
+
+        # Uncertainty
+        if any(k in msg for k in {"uncertainty", "ไม่แน่นอน", "epistemic", "aleatoric", "familiar"}):
+            return self._uncertainty_summary()
+
+        # Pattern / Sequence memory
+        if any(k in msg for k in {"pattern", "sequence", "จำ", "fingerprint", "trajectory"}):
+            return self._memory_summary()
+
+        # Signal / Confidence
+        if any(k in msg for k in {"signal", "สัญญาณ", "confidence", "มั่นใจ", "buy", "sell", "hold"}):
+            return self._signal_summary()
+
+        # Capital Guard / Stop
+        if any(k in msg for k in {"capitalguard", "capital", "guard", "หยุด", "limit", "stop", "protect", "ป้องกัน"}):
+            return self._capital_guard_summary()
+
+        # Brain status
+        if any(k in msg for k in {"brain", "สมอง", "node", "graph", "knowledge", "ความรู้"}):
+            return self._brain_summary()
+
+        # Status overall
+        if any(k in msg for k in {"สถานะ", "status", "ดูสิ", "เป็นยังไง", "ตอนนี้"}):
+            return self._full_status()
+
+        # Summary
+        if any(k in msg for k in {"สรุป", "summary", "overview", "ภาพรวม"}):
+            return self._full_status()
+
+        # Regime
+        if any(k in msg for k in {"regime", "ตลาด", "trending", "ranging", "volatile"}):
+            return self._regime_info()
+
+        # Why / ทำไม
+        if any(k in msg for k in {"ทำไม", "why", "เหตุผล", "reason"}):
+            return self._explain_last_decision()
+
+        return (
+            "ขออภัยครับ ผมยังไม่เข้าใจคำถามนี้ 🤔\n"
+            "ลองถามเกี่ยวกับ: สถานะ, win rate, กลยุทธ์, กฎ, สรุป\n"
+            "หรือพิมพ์ 'ช่วย' เพื่อดูรายการคำถามที่รองรับ"
+        )
+
+    # ── Response helpers ────────────────────────────────────────────────────────
+
+    def _trade_summary(self) -> str:
+        t = _trade_stats
+        trades = t.get("trades", 0)
+        wins   = t.get("wins", 0)
+        pnl    = t.get("pnl", 0.0)
+        wr     = wins / max(trades, 1)
+        emoji  = "🔥" if wr > 0.65 else ("✅" if wr > 0.50 else "⚠️")
+        return (
+            f"{emoji} สถิติการเทรด\n\n"
+            f"เทรดทั้งหมด: {trades} ไม้\n"
+            f"ชนะ: {wins} | แพ้: {trades - wins}\n"
+            f"Win Rate: {wr:.1%}\n"
+            f"P&L รวม: {'+'if pnl>=0 else ''}{pnl:.2f} USD"
+        )
+
+    def _balance_summary(self) -> str:
+        bal = _connector.get_balance() if _connector else 0.0
+        pnl = _trade_stats.get("pnl", 0.0)
+        cg  = _capital_guard
+        result = f"💰 ยอดเงินปัจจุบัน: ${bal:.2f}\nP&L รวม: {'+' if pnl >= 0 else ''}{pnl:.2f}"
+        if cg and cg.account_type == "REAL":
+            st = cg.status()
+            result += (
+                f"\n\n🛡️ CapitalGuard (REAL)\n"
+                f"P&L วันนี้: {'+' if st['session_pnl'] >= 0 else ''}{st['session_pnl']:.2f}\n"
+                f"ขาดทุนสะสม: {st['loss_pct']:.1%} (limit {st['daily_loss_limit']:.0%})\n"
+                f"กำไรสะสม: {st['profit_pct']:.1%} (target {st['profit_target']:.0%})"
+            )
+        return result
+
+    def _strategy_summary(self) -> str:
+        if not _brain:
+            return "⚠️ AI brain ยังไม่ได้โหลด"
+        st = _brain.get_status()
+        strat   = st.get("active_strategy", "Unknown")
+        stats   = st.get("strategy_stats", [])
+        lines   = [f"🎯 กลยุทธ์ที่ใช้อยู่: **{strat}**\n"]
+        for s in stats[:5]:
+            bar = "█" * int(s["win_rate"] * 10) + "░" * (10 - int(s["win_rate"] * 10))
+            lines.append(f"{s['name'][:20]}: {bar} {s['win_rate']:.0%} ({s.get('trades', '?')} ไม้)")
+        return "\n".join(lines)
+
+    def _rules_summary(self) -> str:
+        if not _brain:
+            return "⚠️ AI brain ยังไม่ได้โหลด"
+        text = _brain.rule_distiller.format_rules()
+        stats = _brain.rule_distiller.stats()
+        return (
+            f"📋 {text}\n\n"
+            f"📊 Log size: {stats['log_size']} trades, "
+            f"wins: {stats['wins_in_log']}"
+        )
+
+    def _uncertainty_summary(self) -> str:
+        if not _brain:
+            return "⚠️ AI brain ยังไม่ได้โหลด"
+        u = _brain._last_uncertainty
+        if not u:
+            return "ยังไม่มีข้อมูล uncertainty (AI ยังไม่ได้เทรด)"
+        skip = _brain.uncertainty_estimator.should_skip_trade(
+            u.get("epistemic", 0), u.get("aleatoric", 0)
+        )
+        return (
+            f"🔮 ความไม่แน่นอนล่าสุด\n\n"
+            f"Epistemic (ไม่รู้จักสภาวะ): {u.get('epistemic', 0):.2f}\n"
+            f"Aleatoric (สัญญาณวุ่นวาย): {u.get('aleatoric', 0):.2f}\n"
+            f"รวม: {u.get('total', 0):.2f}\n"
+            f"Conf multiplier: ×{u.get('conf_multiplier', 1):.2f}\n"
+            f"เคยเห็นสภาวะนี้: {u.get('familiar_trades', 0)} ครั้ง\n"
+            f"ควรข้ามการเทรด: {'⚠️ ใช่' if skip else '✅ ไม่'}\n\n"
+            f"📝 {u.get('description', '')}"
+        )
+
+    def _memory_summary(self) -> str:
+        if not _brain:
+            return "⚠️ AI brain ยังไม่ได้โหลด"
+        pat  = _brain.pattern_memory.stats()
+        seq  = _brain.sequence_memory.stats()
+        ep   = _brain.episodic.summary()
+        return (
+            f"🧩 ระบบความจำ\n\n"
+            f"Pattern Memory (OTC fingerprint):\n"
+            f"  Patterns: {pat.get('total_patterns', 0)} | "
+            f"Trusted: {pat.get('trusted_patterns', 0)}\n\n"
+            f"Sequence Memory (8-trade trajectory):\n"
+            f"  Sequences: {seq.get('total_sequences', 0)} | "
+            f"Trusted: {seq.get('trusted_sequences', 0)}\n"
+            f"  Window filled: {seq.get('window_fill', 0)}/8\n\n"
+            f"Episodic Memory:\n"
+            f"  ประสบการณ์: {ep.get('total', 0)} ครั้ง"
+        )
+
+    def _signal_summary(self) -> str:
+        if not _brain:
+            return "⚠️ AI brain ยังไม่ได้โหลด"
+        conf = _brain._last_confidence
+        regime = _brain._last_regime
+        u = _brain._last_uncertainty
+        conf_emoji = "🟢" if conf > 0.65 else ("🟡" if conf > 0.50 else "🔴")
+        result = (
+            f"📡 สัญญาณล่าสุด\n\n"
+            f"Confidence: {conf_emoji} {conf:.1%}\n"
+            f"Regime: {regime.upper()}\n"
+        )
+        if u:
+            result += f"Uncertainty: {u.get('total', 0):.2f} (×{u.get('conf_multiplier', 1):.2f})"
+        return result
+
+    def _capital_guard_summary(self) -> str:
+        cg = _capital_guard
+        if not cg:
+            return "⚠️ CapitalGuard ยังไม่ได้โหลด"
+        st = cg.status()
+        account = st.get("account_type", "PRACTICE")
+        if account == "PRACTICE":
+            return (
+                "🎓 ขณะนี้ใช้ **บัญชีทดลอง (PRACTICE)**\n\n"
+                "CapitalGuard ไม่ทำงานในบัญชีทดลอง\n"
+                "เพราะ PRACTICE = เรียนรู้ได้ไม่จำกัด ไม่มีการหยุด\n\n"
+                "สลับไปบัญชีจริง (REAL) เพื่อเปิดใช้การป้องกันทุน"
+            )
+        stopped = st.get("stopped", False)
+        stop_reason = st.get("stop_reason", "")
+        return (
+            f"🛡️ CapitalGuard — REAL Account\n\n"
+            f"P&L วันนี้: {'+' if st['session_pnl'] >= 0 else ''}{st['session_pnl']:.2f}\n"
+            f"ขาดทุน: {st['loss_pct']:.1%} / limit {st['daily_loss_limit']:.0%}\n"
+            f"กำไร: {st['profit_pct']:.1%} / target {st['profit_target']:.0%}\n"
+            f"Kelly bet: ${st['kelly_amount']:.2f}\n"
+            f"วันที่: {st['day_date']}\n\n"
+            + (f"⛔ หยุดแล้ว: {stop_reason}" if stopped else "✅ กำลังเทรดปกติ")
+        )
+
+    def _brain_summary(self) -> str:
+        if not _brain:
+            return "⚠️ AI brain ยังไม่ได้โหลด"
+        st = _brain.get_status()
+        return (
+            f"🧠 สมอง AI\n\n"
+            f"Knowledge nodes: {st.get('graph_nodes', 0)}\n"
+            f"Connections: {st.get('graph_branches', 0)}\n"
+            f"Avg confidence: {st.get('avg_confidence', 0):.2f}\n"
+            f"Episodic memories: {st.get('episodic_memories', 0)}\n\n"
+            f"Brain Age: {st.get('brain_age', 0)} ปี {st.get('brain_emoji', '')} {st.get('brain_stage', '')}\n"
+            f"Score: {st.get('brain_score', 0)}/100"
+        )
+
+    def _full_status(self) -> str:
+        running = _ai_running
+        trades  = _trade_stats.get("trades", 0)
+        wins    = _trade_stats.get("wins", 0)
+        pnl     = _trade_stats.get("pnl", 0.0)
+        wr      = wins / max(trades, 1)
+        bal     = _connector.get_balance() if _connector else 0.0
+        ai_status = "🟢 กำลังทำงาน" if running else "🔴 หยุดอยู่"
+        result = (
+            f"📊 สรุปสถานการณ์\n\n"
+            f"AI: {ai_status}\n"
+            f"Balance: ${bal:.2f}\n"
+            f"Win Rate: {wr:.1%} ({wins}/{trades})\n"
+            f"P&L รวม: {'+' if pnl >= 0 else ''}{pnl:.2f}\n"
+        )
+        if _brain:
+            st = _brain.get_status()
+            result += (
+                f"\n🧠 Brain: {st.get('brain_stage', '')} {st.get('brain_emoji', '')} "
+                f"({st.get('graph_nodes', 0)} nodes)\n"
+                f"กลยุทธ์: {st.get('active_strategy', 'Unknown')}"
+            )
+        if _capital_guard and _capital_guard.account_type == "REAL":
+            cg = _capital_guard.status()
+            result += f"\n🛡️ CapitalGuard P&L: {cg['session_pnl']:+.2f}"
+        return result
+
+    def _regime_info(self) -> str:
+        if not _brain:
+            return "⚠️ AI brain ยังไม่ได้โหลด"
+        regime = _brain._last_regime
+        desc = {
+            "trending": "📈 Trending — ตลาดมีทิศทางชัดเจน ADX สูง เหมาะกับ trend following",
+            "ranging":  "↔️ Ranging — ตลาดไซด์เวย์ เหมาะกับ mean reversion",
+            "volatile": "⚡ Volatile — ตลาดผันผวนสูง ระมัดระวัง confidence ลดลง",
+            "unknown":  "❓ ยังไม่ทราบ regime (AI ยังไม่ได้วิเคราะห์)",
+        }.get(regime, f"Regime: {regime}")
+        return desc
+
+    def _explain_last_decision(self) -> str:
+        if not _brain:
+            return "⚠️ AI brain ยังไม่ได้โหลด"
+        conf = _brain._last_confidence
+        u = _brain._last_uncertainty
+        regime = _brain._last_regime
+        strat  = _brain._last_strategy_name
+        result = (
+            f"🤔 เหตุผลการตัดสินใจล่าสุด\n\n"
+            f"กลยุทธ์: {strat}\n"
+            f"Regime: {regime.upper()}\n"
+            f"Confidence: {conf:.1%}\n"
+        )
+        if u:
+            result += (
+                f"\nUncertainty:\n"
+                f"  {u.get('description', 'N/A')}\n"
+                f"  Conf multiplier ×{u.get('conf_multiplier', 1):.2f}"
+            )
+        return result
 
 
 class _WsBroadcastHandler(logging.Handler):
@@ -142,13 +1353,93 @@ def _install_ws_log_handler() -> None:
     root.addHandler(handler)
 
 # ── FastAPI app ───────────────────────────────────────────────────────────────
+def _asyncio_exc_handler(loop, context):
+    """Suppress harmless ConnectionResetError spam from worker WebSocket drops."""
+    exc = context.get("exception")
+    if isinstance(exc, (ConnectionResetError, BrokenPipeError)):
+        return   # WinError 10054 / worker disconnect noise — ignore
+    loop.default_exception_handler(context)
+
+
 @contextlib.asynccontextmanager
 async def _lifespan(application):
-    global _loop
+    global _loop, _ai_running
     _loop = asyncio.get_running_loop()
+    _loop.set_exception_handler(_asyncio_exc_handler)
     _install_ws_log_handler()
     threading.Thread(target=_init_components, daemon=True).start()
-    yield
+    try:
+        yield
+    finally:
+        # ── Graceful shutdown ──────────────────────────────────────────────
+        _ai_running = False
+
+        # Force-exit MUST start first — before any call that could block.
+        # If _brain.shutdown() or _connector.disconnect() hang (file lock /
+        # WebSocket close stall), the timer below guarantees we still exit.
+        def _force_exit():
+            import time as _t, os as _os
+            _t.sleep(8)
+            logger.warning("Forcing process exit (hung threads).")
+            _os._exit(0)
+        threading.Thread(target=_force_exit, daemon=True, name="force-exit").start()
+
+        # Wake the trading env so it stops waiting for trade expiry.
+        if _env:
+            try:
+                _env.stop()
+            except Exception:
+                pass
+
+        # Save all agents on shutdown so learning survives restart.
+        if _knowledge and _agent:
+            try:
+                _knowledge.save_brain(_agent)
+                logger.info("PPO checkpoint saved on shutdown.")
+            except Exception as _ce:
+                logger.debug("Checkpoint save on shutdown failed: %s", _ce)
+        try:
+            _active_ng_sd = _maml if _maml is not None else _hrl
+            if _active_ng_sd is not None:
+                _active_ng_sd.save(os.path.join(config.MODEL_DIR, "rainbow.pt"))
+                logger.info("HRL/MAML checkpoint saved on shutdown.")
+            elif _rainbow is not None:
+                _rainbow.save(os.path.join(config.MODEL_DIR, "rainbow.pt"))
+                logger.info("Rainbow checkpoint saved on shutdown.")
+            if _iqn is not None:
+                _iqn.save(os.path.join(config.MODEL_DIR, "iqn.pt"))
+                logger.info("IQN checkpoint saved on shutdown.")
+            if _world_trainer is not None:
+                _world_trainer.stop()
+                _world_trainer.save(os.path.join(config.MODEL_DIR, "world_model.pt"))
+                logger.info("WorldModel checkpoint saved on shutdown.")
+        except Exception as _ng_ce:
+            logger.debug("Next-gen agent shutdown save error: %s", _ng_ce)
+
+        # Brain shutdown: save knowledge graph — give it 5 s max.
+        if _brain:
+            def _shutdown_brain():
+                try:
+                    _brain.shutdown()
+                    logger.info("Brain saved on shutdown.")
+                except Exception as _e:
+                    logger.debug("Brain shutdown error: %s", _e)
+            _bt = threading.Thread(target=_shutdown_brain, daemon=True, name="brain-shutdown")
+            _bt.start()
+            _bt.join(timeout=5)
+            if _bt.is_alive():
+                logger.warning("Brain shutdown timed out — continuing.")
+
+        # Connector disconnect: close IQ Option WebSocket — give it 3 s max.
+        if _connector:
+            def _do_disconnect():
+                try:
+                    _connector.disconnect()
+                except Exception:
+                    pass
+            _dt = threading.Thread(target=_do_disconnect, daemon=True, name="connector-disconnect")
+            _dt.start()
+            _dt.join(timeout=3)
 
 
 app = FastAPI(title="IQ Option AI Trading Dashboard", docs_url=None, lifespan=_lifespan)
@@ -231,6 +1522,71 @@ async def api_checks():
     return _check_results
 
 
+@app.get("/api/desires")
+async def api_desires():
+    if _brain is None:
+        return {"desires": [], "pending": 0}
+    d = _brain.desire_engine
+    return {"desires": d.get_all(), "pending": len(d.get_pending())}
+
+
+@app.post("/api/desires/{desire_id}/approve")
+async def api_desire_approve(desire_id: str, body: dict = None):
+    if _brain is None:
+        return {"ok": False}
+    note = (body or {}).get("note", "")
+    ok = _brain.desire_engine.approve(desire_id, note)
+    if ok:
+        broadcast_sync({"type": "desire_updated", "id": desire_id, "status": "approved"})
+    return {"ok": ok}
+
+
+@app.post("/api/desires/{desire_id}/deny")
+async def api_desire_deny(desire_id: str, body: dict = None):
+    if _brain is None:
+        return {"ok": False}
+    reason = (body or {}).get("reason", "")
+    ok = _brain.desire_engine.deny(desire_id, reason)
+    if ok:
+        broadcast_sync({"type": "desire_updated", "id": desire_id, "status": "denied"})
+    return {"ok": ok}
+
+
+@app.get("/api/ethics")
+async def api_ethics():
+    from trading_ai.brain.ethics import get_principles
+    return {"principles": get_principles()}
+
+
+@app.post("/api/smtp-config")
+async def api_smtp_config(body: dict):
+    _save_smtp_config({
+        "smtp_user":    body.get("smtp_user", ""),
+        "smtp_pass":    body.get("smtp_pass", ""),
+        "notify_email": body.get("notify_email", "titanbuff.company.game@gmail.com"),
+    })
+    return {"ok": True}
+
+
+@app.get("/api/smtp-config")
+async def api_smtp_config_get():
+    cfg = dict(_smtp_config)
+    if "smtp_pass" in cfg:
+        cfg["smtp_pass"] = "****" if cfg["smtp_pass"] else ""
+    return cfg
+
+
+@app.get("/worker.py")
+async def serve_worker_py():
+    """Serve worker.py so the .bat file can auto-download it on first run."""
+    from fastapi.responses import FileResponse
+    path = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", "worker.py"))
+    if os.path.exists(path):
+        return FileResponse(path, media_type="text/plain", filename="worker.py")
+    from fastapi.responses import JSONResponse
+    return JSONResponse({"error": "worker.py not found on server"}, status_code=404)
+
+
 # ── WebSocket handler ─────────────────────────────────────────────────────────
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
@@ -252,12 +1608,138 @@ async def websocket_endpoint(ws: WebSocket):
         manager.disconnect(ws)
 
 
+@app.websocket("/ws/worker")
+async def worker_endpoint(ws: WebSocket):
+    """Worker machines connect here to receive training tasks and return results."""
+    import base64
+    await ws.accept()
+    worker_id = str(id(ws))[-8:]
+    worker_name = "Worker"
+    _worker_sockets[worker_id] = ws
+    logger.info("Worker %s connected (total=%d)", worker_id, len(_worker_sockets))
+    broadcast_sync({
+        "type": "status",
+        "message": f"⚙️ Worker เครื่องใหม่เชื่อมต่อแล้ว (รวม {len(_worker_sockets)} เครื่อง)",
+        "level": "success",
+    })
+    broadcast_sync({"type": "workers", "count": len(_worker_sockets)})
+    try:
+        while True:
+            raw = await ws.receive_text()
+            msg = json.loads(raw)
+            mtype = msg.get("type")
+
+            if mtype == "hello":
+                worker_name = msg.get("name", f"Worker-{worker_id}")
+                # Reject if another socket from the same machine is still active —
+                # prevents double-started worker.py instances from piling up.
+                existing = [wid for wid, wname in _worker_names.items()
+                            if wname == worker_name and wid != worker_id]
+                if existing:
+                    logger.warning("Worker %s rejected — %s already connected as %s",
+                                   worker_id, worker_name, existing[0])
+                    await ws.send_text(json.dumps({
+                        "type": "error",
+                        "message": f"{worker_name} already connected — please close the other instance.",
+                    }))
+                    await ws.close(code=1008)
+                    return
+                _worker_names[worker_id] = worker_name
+                await ws.send_text(json.dumps({
+                    "type": "welcome",
+                    "worker_id": worker_id,
+                    "message": f"เชื่อมต่อสำเร็จ! ยินดีต้อนรับ {worker_name}",
+                }))
+                logger.info("Worker %s identified as '%s'", worker_id, worker_name)
+
+            elif mtype == "work_result":
+                # Worker finished training — store weights for FedAvg
+                weights_b64 = msg.get("weights", "")
+                metrics     = msg.get("metrics", {})
+                if weights_b64:
+                    weights_bytes = base64.b64decode(weights_b64)
+                    with _worker_lock:
+                        _worker_results[worker_id] = weights_bytes
+                    logger.info(
+                        "Worker %s returned weights | ploss=%.4f vloss=%.4f",
+                        worker_id, metrics.get("policy_loss", 0), metrics.get("value_loss", 0),
+                    )
+                    broadcast_sync({
+                        "type":    "status",
+                        "message": f"⚙️ {worker_name}: ส่งผล training กลับแล้ว "
+                                   f"(policy_loss={metrics.get('policy_loss',0):.4f})",
+                        "level":   "info",
+                    })
+
+            elif mtype == "ping":
+                await ws.send_text(json.dumps({"type": "pong"}))
+
+            elif mtype == "knowledge_result":
+                # Worker researched knowledge from Wikipedia/Google News — inject into brain
+                global _worker_knowledge_count
+                nodes_data = msg.get("nodes", [])
+                if nodes_data and _brain:
+                    from trading_ai.brain.knowledge_node import KnowledgeNode
+                    import uuid as _uuid
+                    nodes = []
+                    for d in nodes_data:
+                        try:
+                            if "node_id" not in d:
+                                d["node_id"] = str(_uuid.uuid4())[:8]
+                            nodes.append(KnowledgeNode.from_dict(d))
+                        except Exception as _nd_exc:
+                            logger.debug("Knowledge node parse error: %s", _nd_exc)
+                    if nodes:
+                        try:
+                            _brain.reasoner.absorb_internet_knowledge(nodes)
+                            _worker_knowledge_count += len(nodes)
+                            logger.info(
+                                "Worker %s contributed %d knowledge nodes (total=%d)",
+                                worker_id, len(nodes), _worker_knowledge_count,
+                            )
+                            broadcast_sync({
+                                "type":    "status",
+                                "message": f"🧠 {worker_name}: ส่งความรู้ {len(nodes)} nodes — brain เรียนรู้แล้ว",
+                                "level":   "success",
+                            })
+                            broadcast_sync({
+                                "type":             "workers",
+                                "count":            len(_worker_sockets),
+                                "knowledge_nodes":  _worker_knowledge_count,
+                            })
+                        except Exception as _absorb_exc:
+                            logger.error("absorb_internet_knowledge failed: %s", _absorb_exc)
+
+    except WebSocketDisconnect:
+        pass
+    except Exception as exc:
+        logger.error("Worker %s error: %s", worker_id, exc)
+    finally:
+        _worker_sockets.pop(worker_id, None)
+        _worker_names.pop(worker_id, None)
+        with _worker_lock:
+            _worker_results.pop(worker_id, None)
+        logger.info("Worker %s disconnected (remaining=%d)", worker_id, len(_worker_sockets))
+        broadcast_sync({
+            "type": "status",
+            "message": f"⚙️ Worker ออกจากระบบ (เหลือ {len(_worker_sockets)} เครื่อง)",
+            "level": "warn",
+        })
+        broadcast_sync({"type": "workers", "count": len(_worker_sockets)})
+
+
 async def _send_current_state(ws: WebSocket):
     """Push current system state to a newly connected client."""
     bal = _connector.get_balance() if _connector else 0.0
     all_passed_cached = (
         all(r["passed"] for r in _check_results) if _check_results else False
     )
+    import socket as _sock
+    try:
+        _lan_ip = _sock.gethostbyname(_sock.gethostname())
+    except Exception:
+        _lan_ip = "localhost"
+
     await manager.send(ws, {
         "type": "init",
         "connected": _connector is not None,
@@ -276,6 +1758,9 @@ async def _send_current_state(ws: WebSocket):
             "amount": config.TRADE_AMOUNT,
             "asset": config.ASSET,
         },
+        "server_ip":      _lan_ip,
+        "worker_count":   len(_worker_sockets),
+        "worker_url":     f"ws://{_lan_ip}:8000/ws/worker",
     })
     # Send OTC candle history so charts populate immediately
     if _candle_history:
@@ -290,6 +1775,19 @@ async def _send_current_state(ws: WebSocket):
         })
     if _capital_guard:
         await manager.send(ws, {"type": "capital_guard", **_capital_guard.status()})
+    if _brain:
+        de = _brain.desire_engine
+        await manager.send(ws, {
+            "type":    "desires_init",
+            "desires": de.get_all(),
+            "pending": len(de.get_pending()),
+        })
+    # Send chat history so newly-connected clients see the conversation
+    if _chat_history:
+        await manager.send(ws, {
+            "type":    "chat_history",
+            "entries": list(_chat_history),
+        })
     # Replay buffered log lines so the Logs panel is populated immediately
     if _log_buffer:
         await manager.send(ws, {
@@ -333,6 +1831,17 @@ async def _handle_client_message(ws: WebSocket, msg: Dict):
             "password": str(msg.get("password", "")).strip(),
         }
         _otp_event.set()   # wake the waiting _init_components thread
+
+    elif mtype == "chat_user":
+        user_msg = str(msg.get("message", "")).strip()
+        if user_msg:
+            ts = time.strftime("%H:%M")
+            user_entry = {"role": "user", "message": user_msg, "time": ts}
+            _chat_history.append(user_entry)
+            ai_reply = ThinkingAI().think(user_msg)
+            ai_entry = {"role": "ai", "message": ai_reply, "time": ts}
+            _chat_history.append(ai_entry)
+            await manager.send(ws, {"type": "chat_ai", **ai_entry})
 
     elif mtype == "ping":
         await manager.send(ws, {"type": "pong"})
@@ -435,10 +1944,11 @@ def _await_manual_trade_result(order_id: int, asset_display: str, direction: str
                             "message": f"⚠️ Manual trade {asset_display}: ผลลัพธ์ไม่ทราบ",
                             "level": "warn"})
             return
-        _trade_stats["trades"] += 1
-        if pnl > 0:
-            _trade_stats["wins"] += 1
-        _trade_stats["pnl"] += pnl
+        with _stats_lock:
+            _trade_stats["trades"] += 1
+            if pnl > 0:
+                _trade_stats["wins"] += 1
+            _trade_stats["pnl"] += pnl
         bal = _connector.get_balance()
         entry = {
             "time":       time.strftime("%H:%M:%S"),
@@ -452,7 +1962,8 @@ def _await_manual_trade_result(order_id: int, asset_display: str, direction: str
         }
         _trade_history.append(entry)
         _save_trade_stats()
-        wr = _trade_stats["wins"] / max(_trade_stats["trades"], 1)
+        with _stats_lock:
+            wr = _trade_stats["wins"] / max(_trade_stats["trades"], 1)
         broadcast_sync({
             "type":      "trade",
             "order_id":  int(order_id),
@@ -534,6 +2045,52 @@ def _apply_settings(msg: Dict):
             broadcast_sync({"type": "capital_guard", **_capital_guard.status()})
 
 
+# ── Distributed Worker helpers ───────────────────────────────────────────────
+
+def _dispatch_to_workers(agent) -> None:
+    """
+    Send the current buffer + model weights to all connected workers.
+    Workers will run PPO training and return updated weights via /ws/worker.
+    Called from _ai_loop() (background thread) when buffer is ready.
+    """
+    import base64
+    if not _worker_sockets:
+        return
+    try:
+        weights_b64  = base64.b64encode(agent.get_weights_bytes()).decode()
+        buffer_b64   = base64.b64encode(agent.get_buffer_bytes()).decode()
+        n_workers    = len(_worker_sockets)
+        logger.info("Dispatching training task to %d worker(s)…", n_workers)
+        for wid, ws in list(_worker_sockets.items()):
+            payload = json.dumps({
+                "type":       "work_request",
+                "weights":    weights_b64,
+                "buffer":     buffer_b64,
+                "worker_id":  wid,
+                "hypers": {
+                    "obs_size":      agent.obs_size,
+                    "n_actions":     agent.n_actions,
+                    "hidden_size":   agent.hidden_size,
+                    "ppo_epochs":    config.PPO_EPOCHS,
+                    "batch_size":    config.BATCH_SIZE,
+                    "clip_epsilon":  config.CLIP_EPSILON,
+                    "gamma":         config.GAMMA,
+                    "gae_lambda":    config.GAE_LAMBDA,
+                    "lr":            config.LEARNING_RATE,
+                },
+            })
+            try:
+                loop = asyncio.get_event_loop()
+                future = asyncio.run_coroutine_threadsafe(
+                    ws.send_text(payload), loop
+                )
+                future.result(timeout=5)
+            except Exception as exc:
+                logger.warning("Could not dispatch to worker %s: %s", wid, exc)
+    except Exception as exc:
+        logger.error("Worker dispatch error: %s", exc)
+
+
 # ── AI trading loop (runs in background thread) ───────────────────────────────
 def _ai_loop():
     global _ai_running, _trade_stats, _agent, _brain, _knowledge, _env, _connector, _capital_guard
@@ -560,6 +2117,9 @@ def _ai_loop():
         _env.on_trade_closed = _close_open_order
 
     obs, _ = _env.reset()
+
+    # ── Asset unavailability backoff (asset → timestamp unavailable until) ──
+    _unavail: Dict[str, float] = {}
 
     # ── CapitalGuard init ──────────────────────────────────────────────────
     if _capital_guard is None:
@@ -595,9 +2155,12 @@ def _ai_loop():
         # opportunity (highest confidence non-HOLD signal).  Falls back to
         # config.ASSET if nothing else is available.
         candidates = []   # list of (display_name, api_name, signal, obs, ppo_action)
-        for display_name in OTC_ASSETS:
+        for display_name in ALL_ASSETS:
             api_name = _resolved_asset_names.get(display_name)
             if not api_name:
+                continue
+            # Skip temporarily unavailable assets (5-minute backoff)
+            if _unavail.get(api_name, 0) > time.time():
                 continue
             _env.set_asset(api_name)
             try:
@@ -609,17 +2172,49 @@ def _ai_loop():
             # A short yield here lets the event loop breathe between assets.
             time.sleep(0.1)
             indicator_vec = asset_obs[:N_INDICATORS]
-            ppo_action, log_prob, value = _agent.select_action(asset_obs)
+
+            # ── ลำดับ 2+4: HRL/MAML decision (primary if trained enough) ─────
+            _active_ng = _maml if _maml is not None else _hrl  # maml wraps hrl
+            if _active_ng is not None and _active_ng.total_steps > 50:
+                ng_action, log_prob, value = _active_ng.select_action(asset_obs)
+                _, ng_conf = _active_ng.get_confidence(asset_obs)
+            else:
+                ng_action, ng_conf = None, 0.0
+                log_prob = value = 0.0
+
+            # ── ลำดับ 3: IQN distributional confidence ──────────────────────
+            if _iqn is not None and _iqn.total_steps > 30:
+                iqn_action, iqn_conf = _iqn.get_confidence(asset_obs)
+                iqn_uncertainty = _iqn.get_uncertainty(asset_obs)
+            else:
+                iqn_action, iqn_conf, iqn_uncertainty = None, 0.0, 1.0
+
+            # ── PPO fallback ─────────────────────────────────────────────────
+            ppo_action, ppo_lp, ppo_val = _agent.select_action(asset_obs)
             _, ppo_conf = _agent.get_confidence(asset_obs)
+            if ng_action is None:
+                log_prob, value = ppo_lp, ppo_val
+
+            # ── Ensemble: pick best action ───────────────────────────────────
+            # HRL/MAML > IQN > PPO, weighted by confidence and training maturity
+            if ng_action is not None and ng_conf >= ppo_conf:
+                best_action, best_conf = ng_action, ng_conf
+            elif iqn_action is not None and iqn_conf >= ppo_conf and iqn_uncertainty < 0.5:
+                best_action, best_conf = iqn_action, iqn_conf
+            else:
+                best_action, best_conf = ppo_action, ppo_conf
+
+            # ── Switch brain mode: OTC = pattern-only, Forex = full signals ──
+            _brain.set_market_mode("OTC" if is_otc_asset(display_name) else "FOREX")
             # Pass raw candles so brain can do pattern-memory lookup
-            signal = _brain.think(indicator_vec, ppo_action, ppo_conf,
+            signal = _brain.think(indicator_vec, best_action, best_conf,
                                   candles=getattr(_env, "_last_candles", None))
 
             # Adjust final action through brain's risk multiplier + confidence gate
-            final_action = ppo_action
+            final_action = best_action
             if signal.risk_multiplier < 0.2:
                 final_action = 0
-            elif signal.action != ppo_action and signal.confidence > ppo_conf + 0.15:
+            elif signal.action != best_action and signal.confidence > best_conf + 0.15:
                 final_action = signal.action
 
             candidates.append({
@@ -636,6 +2231,7 @@ def _ai_loop():
             broadcast_sync({
                 "type":       "signal",
                 "asset":      display_name,
+                "asset_type": "OTC" if is_otc_asset(display_name) else "FOREX",
                 "action":     {0:"HOLD",1:"BUY",2:"SELL"}[final_action],
                 "confidence": round(signal.confidence, 3),
                 "risk":       round(signal.risk_multiplier, 2),
@@ -646,18 +2242,69 @@ def _ai_loop():
             time.sleep(3)
             continue
 
-        # Dynamic min-confidence via CapitalGuard
-        # PRACTICE: 0.30 → 0.40 → 0.50 (เรียนรู้ได้มาก)
-        # REAL:     0.55 → 0.58 → 0.62 → 0.65 (รอสัญญาณมั่นใจเท่านั้น)
-        confirmed = _trade_stats.get("trades", 0)
-        if _capital_guard:
-            min_conf = _capital_guard.min_confidence(confirmed)
-        else:
-            min_conf = 0.30 if confirmed < 20 else (0.40 if confirmed < 50 else 0.50)
+        # ── Fear System: block trades during REAL-mode cooldown ─────────────
+        if _brain:
+            in_cooldown, fear_reason, remaining_min = _brain.fear_system.should_cooldown()
+            if in_cooldown:
+                broadcast_sync({
+                    "type": "status",
+                    "message": f"⏸️ {fear_reason} ({remaining_min:.0f} นาทีที่เหลือ)",
+                    "level": "warn",
+                })
+                time.sleep(10)
+                continue
 
-        # Pick best non-HOLD signal across all assets
+        # Dynamic min-confidence — payout-aware + time-of-day adjusted
+        confirmed  = _trade_stats.get("trades", 0)
+        # Best-payout asset in candidates for threshold calculation
+        _best_pay  = max(
+            (_connector.get_payout(c["api"]) / 100.0 for c in candidates if c["api"]),
+            default=0.85,
+        )
+        if _capital_guard:
+            import numpy as _np2
+            min_conf = _capital_guard.min_confidence_for_payout(confirmed, _best_pay)
+        else:
+            _bev = 1.0 / (1.0 + _best_pay)
+            min_conf = max(0.30 if confirmed < 20 else (0.40 if confirmed < 50 else 0.50),
+                           _bev + 0.06)
+
+        # Time-of-day quality boost: raise bar during historically bad hours
+        _tod_hour = int(time.strftime("%H"))
+        _h_stat   = _hourly_stats.get(_tod_hour, {})
+        _h_trades = _h_stat.get("trades", 0)
+        if _h_trades >= 20:
+            _h_wr   = _h_stat["wins"] / _h_trades
+            _h_bev  = 1.0 / (1.0 + _best_pay)
+            if _h_wr < _h_bev - 0.04:                           # historically bad hour
+                min_conf = min(0.90, min_conf + 0.07)
+                logger.debug("Time-of-day penalty hour=%d wr=%.1f%% min_conf→%.2f",
+                             _tod_hour, _h_wr * 100, min_conf)
+            elif _h_wr > _h_bev + 0.08 and _h_trades >= 30:     # historically good hour
+                min_conf = max(0.25, min_conf - 0.03)
+
+        # Apply fear's extra confidence requirement (REAL mode only)
+        if _brain:
+            fear_boost = _brain.fear_system.get_confidence_threshold_boost() / 100.0
+            if fear_boost > 0:
+                min_conf = min(0.92, min_conf + fear_boost)
+
+        # Pick best non-HOLD signal — also gate on per-asset expected value.
+        # After 40+ trades on an asset, if EV is clearly negative skip it.
+        def _ev_ok(c: dict) -> bool:
+            st = _asset_stats.get(c["api"], {})
+            n  = st.get("trades", 0)
+            if n < 40:
+                return True  # not enough data — allow learning
+            wr  = st["wins"] / n
+            pay = _connector.get_payout(c["api"]) / 100.0
+            ev  = wr * pay - (1.0 - wr)
+            return ev > -0.12   # skip if EV clearly negative (-12% edge)
+
         tradeable = [c for c in candidates
-                     if c["final"] != 0 and c["signal"].confidence >= min_conf]
+                     if c["final"] != 0
+                     and c["signal"].confidence >= min_conf
+                     and _ev_ok(c)]
         if tradeable:
             tradeable.sort(key=lambda c: c["signal"].confidence, reverse=True)
             best = tradeable[0]
@@ -690,22 +2337,48 @@ def _ai_loop():
         _env._trade_amount = trade_amount   # pass Kelly amount to env
         next_obs, reward, terminated, truncated, info = _env.step(final_action)
 
+        # If a trade was attempted but rejected (e.g. asset not available), back off 5 min
+        if info.get("skipped", False) and final_action != 0:
+            _unavail[api_name] = time.time() + 300
+            logger.info("Asset %s marked unavailable for 5 min", api_name)
+
         if not info.get("skipped", False):
             pnl = info.get("pnl", 0.0)
             logger.info("Trade %s on %s completed: pnl=%+.2f total_trades=%d",
                         action_name, display_name, pnl, _trade_stats["trades"] + 1)
-            _brain.learn(pnl, final_action, indicator_vec, ppo_action, next_obs=next_obs,
-                         candles=getattr(_env, "_last_candles", None))
+            try:
+                _brain.learn(pnl, final_action, indicator_vec, ppo_action, next_obs=next_obs,
+                             candles=getattr(_env, "_last_candles", None))
+            except Exception as _learn_exc:
+                logger.error("brain.learn() failed (trade still counted): %s", _learn_exc)
 
-            _trade_stats["trades"] += 1
+            with _stats_lock:
+                _trade_stats["trades"] += 1
+                if pnl > 0:
+                    _trade_stats["wins"] += 1
+                _trade_stats["pnl"] += pnl
+
+            # Per-asset + hourly win-rate tracking
+            if api_name not in _asset_stats:
+                _asset_stats[api_name] = {"wins": 0, "trades": 0, "pnl": 0.0}
+            _asset_stats[api_name]["trades"] += 1
+            _asset_stats[api_name]["pnl"]    += pnl
             if pnl > 0:
-                _trade_stats["wins"] += 1
-            _trade_stats["pnl"] += pnl
+                _asset_stats[api_name]["wins"] += 1
+            _cur_hour = int(time.strftime("%H"))
+            if _cur_hour not in _hourly_stats:
+                _hourly_stats[_cur_hour] = {"wins": 0, "trades": 0}
+            _hourly_stats[_cur_hour]["trades"] += 1
+            if pnl > 0:
+                _hourly_stats[_cur_hour]["wins"] += 1
 
             # ── Capital Guard: record PnL + broadcast status ───────────────
             if _capital_guard:
                 _capital_guard.record_trade_pnl(pnl)
                 broadcast_sync({"type": "capital_guard", **_capital_guard.status()})
+
+            # ── AI proactive chat commentary ───────────────────────────────
+            _broadcast_ai_thought(action_name, display_name, pnl, signal)
 
             entry = {
                 "time": time.strftime("%H:%M:%S"),
@@ -719,6 +2392,25 @@ def _ai_loop():
             }
             _trade_history.append(entry)
             _save_trade_stats()
+
+            # Periodic checkpoint — every 20 trades (PPO + all next-gen agents)
+            if _trade_stats["trades"] % 20 == 0:
+                try:
+                    if _knowledge and _agent:
+                        _knowledge.save_brain(_agent)
+                    _active_ng = _maml if _maml is not None else _hrl
+                    if _active_ng is not None:
+                        _active_ng.save(os.path.join(config.MODEL_DIR, "rainbow.pt"))
+                    elif _rainbow is not None:
+                        _rainbow.save(os.path.join(config.MODEL_DIR, "rainbow.pt"))
+                    if _iqn is not None:
+                        _iqn.save(os.path.join(config.MODEL_DIR, "iqn.pt"))
+                    if _world_trainer is not None:
+                        _world_trainer.save(os.path.join(config.MODEL_DIR, "world_model.pt"))
+                    logger.debug("Periodic checkpoint saved (%d trades)",
+                                 _trade_stats["trades"])
+                except Exception as _ckpt_e:
+                    logger.debug("Periodic checkpoint save error: %s", _ckpt_e)
 
             wr = _trade_stats["wins"] / max(_trade_stats["trades"], 1)
             broadcast_sync({
@@ -758,11 +2450,72 @@ def _ai_loop():
         except Exception as _strat_exc:
             logger.debug("Strategy broadcast error: %s", _strat_exc)
 
-        _agent.store(obs, next_obs, ppo_action, log_prob, reward, value,
-                     terminated or truncated)
+        _done = terminated or truncated
+        _agent.store(obs, next_obs, ppo_action, log_prob, reward, value, _done)
 
+        # ── Feed all next-gen agents from the same experience ────────────────
+        _active_ng = _maml if _maml is not None else _hrl
+        if _active_ng is not None:
+            try:
+                _active_ng.store(obs, next_obs, final_action, log_prob, reward, value, _done)
+            except Exception as _ng_e:
+                logger.debug("HRL/MAML store error: %s", _ng_e)
+        if _iqn is not None:
+            try:
+                _iqn.store(obs, next_obs, final_action, 0.0, reward, 0.0, _done)
+            except Exception as _iq_e:
+                logger.debug("IQN store error: %s", _iq_e)
+        if _rainbow is not None and _hrl is None:
+            # Only store to standalone Rainbow if HRL is not present
+            # (HRL.rainbow already receives it via _active_ng.store)
+            try:
+                _rainbow.store(obs, next_obs, final_action, 0.0, reward, 0.0, _done)
+            except Exception as _rb_e:
+                logger.debug("Rainbow store error: %s", _rb_e)
+
+        # ── World Model: feed real experience + inject imagined rollouts ──────
+        if _world_trainer is not None:
+            try:
+                _world_trainer.add_experience(obs, action, reward, next_obs)
+                # Drain imagined batch and add to HRL/Rainbow buffer
+                imagined = _world_trainer.get_imagined_batch(n=4)
+                for im in imagined:
+                    if _active_ng is not None:
+                        _active_ng.rainbow.per.add(
+                            im["obs"], im["next_obs"], im["action"],
+                            im["reward"] * 0.5, rpe_mult=0.5,
+                        )
+                    elif _rainbow is not None:
+                        _rainbow.per.add(
+                            im["obs"], im["next_obs"], im["action"],
+                            im["reward"] * 0.5, rpe_mult=0.5,
+                        )
+            except Exception as _wm_e:
+                logger.debug("WorldModel feed error: %s", _wm_e)
+
+        # ── PPO update (unchanged) ────────────────────────────────────────────
         if _agent.ready_to_update():
+            # Dispatch to workers BEFORE local update (workers get same buffer)
+            if _worker_sockets:
+                _dispatch_to_workers(_agent)
+
             metrics = _agent.update(next_obs)
+
+            # Apply any pending FedAvg results from workers
+            with _worker_lock:
+                pending = dict(_worker_results)
+                _worker_results.clear()
+            for wid, weights_bytes in pending.items():
+                try:
+                    _agent.fedavg_merge(weights_bytes, alpha=0.25)
+                    broadcast_sync({
+                        "type": "status",
+                        "message": f"🔀 FedAvg: รวม knowledge จาก Worker {wid} แล้ว",
+                        "level": "info",
+                    })
+                except Exception as _fa_exc:
+                    logger.error("FedAvg failed for worker %s: %s", wid, _fa_exc)
+
             _knowledge.save_brain(_agent)
             brain_status = _brain.get_status(ppo_agent=_agent)
             broadcast_sync({"type": "brain", **brain_status})
@@ -774,7 +2527,32 @@ def _ai_loop():
                 "lr":          round(metrics.get("lr", 0), 6),
                 "updates":     _agent.total_updates,
                 "steps":       _agent.total_steps,
+                "workers":     len(_worker_sockets),
             })
+
+        # ── Next-gen agents: online update (every trade) ──────────────────────
+        if _active_ng is not None and _active_ng.ready_to_update():
+            try:
+                ng_metrics = _active_ng.update(next_obs)
+                if ng_metrics:
+                    broadcast_sync({
+                        "type":        "training",
+                        "rainbow_loss": round(ng_metrics.get("rainbow_loss", 0), 4),
+                        "gate_loss":    round(ng_metrics.get("gate_loss", 0), 4),
+                        "dir_loss":     round(ng_metrics.get("dir_loss", 0), 4),
+                        "maml_loss":    round(ng_metrics.get("maml_meta_loss", 0), 4),
+                        "iqn_loss":     0.0,
+                        "updates":      _active_ng.total_updates,
+                        "steps":        _active_ng.total_steps,
+                        "workers":      len(_worker_sockets),
+                    })
+            except Exception as _ng_upd_e:
+                logger.debug("HRL/MAML update error: %s", _ng_upd_e)
+        if _iqn is not None and _iqn.ready_to_update():
+            try:
+                _iqn.update(next_obs)
+            except Exception as _iq_upd_e:
+                logger.debug("IQN update error: %s", _iq_upd_e)
 
         obs = next_obs
         if terminated or truncated:
@@ -784,30 +2562,63 @@ def _ai_loop():
 
 
 # ── Startup: init all components ──────────────────────────────────────────────
-OTC_ASSETS = ["EUR/USD (OTC)", "GBP/USD (OTC)", "AUD/USD (OTC)", "EUR/JPY (OTC)"]
+OTC_ASSETS = [
+    "EUR/USD (OTC)", "GBP/USD (OTC)", "EUR/CAD (OTC)",
+    "EUR/JPY (OTC)",
+]
 
-# IQ Option API names for OTC assets – tries each in order until one works.
+# Regular Forex binary options — real market prices, news/calendar apply.
+# Available weekdays during market hours; practice account uses them 24/7.
+FOREX_ASSETS = [
+    "EUR/USD", "GBP/USD", "EUR/CAD", "EUR/JPY",
+]
+
+ALL_ASSETS = OTC_ASSETS + FOREX_ASSETS
+
+
+def is_otc_asset(display_name: str) -> bool:
+    """True for OTC (synthetic), False for real-market Forex."""
+    return "(OTC)" in display_name
+
+# IQ Option API name candidates — tries each in order until one works.
 OTC_ASSET_MAP: Dict[str, List[str]] = {
     "EUR/USD (OTC)": ["EURUSD-OTC", "EURUSD_otc", "frxEURUSD", "EURUSD"],
     "GBP/USD (OTC)": ["GBPUSD-OTC", "GBPUSD_otc", "frxGBPUSD", "GBPUSD"],
-    "AUD/USD (OTC)": ["AUDUSD-OTC", "AUDUSD_otc", "frxAUDUSD", "AUDUSD"],
     "EUR/JPY (OTC)": ["EURJPY-OTC", "EURJPY_otc", "frxEURJPY", "EURJPY"],
+    "EUR/CAD (OTC)": ["EURCAD-OTC", "EURCAD_otc", "frxEURCAD", "EURCAD"],
 }
+FOREX_ASSET_MAP: Dict[str, List[str]] = {
+    "EUR/USD": ["EURUSD", "frxEURUSD"],
+    "GBP/USD": ["GBPUSD", "frxGBPUSD"],
+    "EUR/CAD": ["EURCAD", "frxEURCAD"],
+    "EUR/JPY": ["EURJPY", "frxEURJPY"],
+}
+# Combined lookup used by _resolve_asset_name()
+ASSET_CANDIDATE_MAP: Dict[str, List[str]] = {**OTC_ASSET_MAP, **FOREX_ASSET_MAP}
 
 # Sanity-check price ranges per asset.  Prices outside these bounds mean
 # iqoptionapi returned data for the WRONG pair (shared-state race condition).
 PRICE_RANGES: Dict[str, tuple] = {
     "EUR/USD (OTC)": (0.90, 1.45),
     "GBP/USD (OTC)": (1.10, 1.75),
-    "AUD/USD (OTC)": (0.50, 0.90),
-    "EUR/JPY (OTC)": (130.0, 200.0),   # EUR/JPY is ~184 in 2025-2026
+    "EUR/JPY (OTC)": (130.0, 200.0),
+    "EUR/CAD (OTC)": (1.40, 1.70),
+    # Real Forex — same ranges
+    "EUR/USD": (0.90, 1.45),
+    "GBP/USD": (1.10, 1.75),
+    "EUR/JPY": (130.0, 200.0),
+    "EUR/CAD": (1.40, 1.70),
 }
 
 # Cache: display_name → resolved api_name (once found, reuse)
 _resolved_asset_names: Dict[str, str] = {}
+# Cache: display_name → timestamp when we last logged "all names failed"
+# Prevents spam-WARNING every 13 seconds for unsupported assets.
+_resolve_failed_at: Dict[str, float] = {}
+_RESOLVE_RETRY_SECS = 600   # re-try failed assets after 10 minutes
 
 # Cache: display_name → list of {time,open,high,low,close} for chart history
-_candle_history: Dict[str, List[Dict]] = {a: [] for a in OTC_ASSETS}
+_candle_history: Dict[str, List[Dict]] = {a: [] for a in ALL_ASSETS}
 
 
 @contextlib.contextmanager
@@ -828,35 +2639,48 @@ def _resolve_asset_name(display_name: str) -> Optional[str]:
       1. A global _candle_lock in IQOptionConnector.get_candles() — only one
          call is in-flight at any time, plus a settle delay inside the lock.
       2. Validating the returned price against known sane ranges.
+    Failed lookups are suppressed for _RESOLVE_RETRY_SECS to avoid log spam.
     """
     if display_name in _resolved_asset_names:
         return _resolved_asset_names[display_name]
 
+    # Don't spam-retry assets that have already failed recently
+    last_fail = _resolve_failed_at.get(display_name, 0.0)
+    if time.time() - last_fail < _RESOLVE_RETRY_SECS:
+        return None
+
     lo, hi = PRICE_RANGES.get(display_name, (0.0, 1e9))
 
-    for api_name in OTC_ASSET_MAP.get(display_name, []):
+    tried = []
+    for api_name in ASSET_CANDIDATE_MAP.get(display_name, []):
         try:
             with _suppress_iqapi_stdout():
                 df = _connector.get_candles(asset=api_name, timeframe_seconds=60, count=5)
             if df is None or len(df) == 0:
+                tried.append(f"{api_name}(no_data)")
                 continue
             price = float(df["close"].iloc[-1])
             if lo <= price <= hi:
                 _resolved_asset_names[display_name] = api_name
                 logger.info("Resolved %s → %s (price=%.5f)", display_name, api_name, price)
                 return api_name
-            logger.warning("Price %.5f out of range [%.2f, %.2f] for %s via %s — skipping",
-                           price, lo, hi, display_name, api_name)
-        except Exception:
+            tried.append(f"{api_name}(price={price:.4f} out_of[{lo},{hi}])")
+        except Exception as e:
+            tried.append(f"{api_name}(err:{type(e).__name__})")
             continue
 
-    logger.warning("Could not resolve API name for %s", display_name)
+    # Record failure time — suppress further retries for _RESOLVE_RETRY_SECS
+    _resolve_failed_at[display_name] = time.time()
+    logger.warning(
+        "Could not resolve API name for %s (will retry in %ds). Tried: %s",
+        display_name, _RESOLVE_RETRY_SECS, ", ".join(tried),
+    )
     return None
 
 
 def _fetch_initial_candles():
-    """Fetch the last 100 candles for each OTC asset (30-second timeframe)."""
-    for display_name in OTC_ASSETS:
+    """Fetch the last 100 candles for each asset (30-second timeframe)."""
+    for display_name in ALL_ASSETS:
         api_name = _resolve_asset_name(display_name)
         if not api_name:
             continue
@@ -976,6 +2800,66 @@ def _init_components():
     _knowledge.load_brain(_agent)
     _brain     = BrainCore(asset=config.ASSET, base_dir=config.MODEL_DIR,
                            account_type=config.IQ_ACCOUNT_TYPE)
+    _brain.desire_engine.set_notify_callback(_on_desire_registered)
+    _brain.journal.set_entry_callback(_on_journal_entry)
+    _brain.nas.set_champion_agent(_agent)   # enable weight transfer to same-arch challengers
+
+    # ── ลำดับ 1: Rainbow DQN ──────────────────────────────────────────────────
+    try:
+        from trading_ai.models.rainbow_dqn import RainbowAgent
+        _rainbow = RainbowAgent(obs_size=OBS_SIZE, n_actions=3)
+        _rb_path = os.path.join(config.MODEL_DIR, "rainbow.pt")
+        _rainbow.load(_rb_path)
+        broadcast_sync({"type":"status","message":"🌈 Rainbow DQN โหลดแล้ว","level":"info"})
+    except Exception as _e:
+        logger.warning("Rainbow DQN init failed: %s", _e)
+        _rainbow = None
+
+    # ── ลำดับ 2: Hierarchical RL (Gate + Direction) ──────────────────────────
+    try:
+        from trading_ai.models.hierarchical_rl import HierarchicalAgent
+        _hrl = HierarchicalAgent(obs_size=OBS_SIZE, n_actions=3)
+        _hrl_path = os.path.join(config.MODEL_DIR, "rainbow.pt")
+        _hrl.load(_hrl_path)
+        broadcast_sync({"type":"status","message":"🎯 Hierarchical RL โหลดแล้ว","level":"info"})
+    except Exception as _e:
+        logger.warning("HRL init failed: %s", _e)
+        _hrl = None
+
+    # ── ลำดับ 3: IQN ─────────────────────────────────────────────────────────
+    try:
+        from trading_ai.models.iqn_agent import IQNAgent
+        _is_real = (config.IQ_ACCOUNT_TYPE or "PRACTICE").upper() == "REAL"
+        _iqn = IQNAgent(obs_size=OBS_SIZE, n_actions=3, conservative=_is_real)
+        _iqn_path = os.path.join(config.MODEL_DIR, "iqn.pt")
+        _iqn.load(_iqn_path)
+        broadcast_sync({"type":"status","message":"📊 IQN โหลดแล้ว","level":"info"})
+    except Exception as _e:
+        logger.warning("IQN init failed: %s", _e)
+        _iqn = None
+
+    # ── ลำดับ 4: MAML (wraps HRL → Rainbow) ─────────────────────────────────
+    try:
+        from trading_ai.brain.maml_agent import MAMLAgent
+        _base_for_maml = _hrl if _hrl is not None else _rainbow
+        if _base_for_maml is not None:
+            _maml = MAMLAgent(_base_for_maml)
+            broadcast_sync({"type":"status","message":"🧬 MAML meta-learning พร้อม","level":"info"})
+    except Exception as _e:
+        logger.warning("MAML init failed: %s", _e)
+        _maml = None
+
+    # ── ลำดับ 5: World Model (background thread) ────────────────────────────
+    try:
+        from trading_ai.brain.world_model import WorldModelTrainer
+        _world_trainer = WorldModelTrainer(obs_size=OBS_SIZE)
+        _wm_path = os.path.join(config.MODEL_DIR, "world_model.pt")
+        _world_trainer.load(_wm_path)
+        _world_trainer.start()
+        broadcast_sync({"type":"status","message":"🌍 World Model thread เริ่มแล้ว","level":"info"})
+    except Exception as _e:
+        logger.warning("WorldModel init failed: %s", _e)
+        _world_trainer = None
 
     from trading_ai.brain.capital_guard import CapitalGuard
     _capital_guard = CapitalGuard(account_type=config.IQ_ACCOUNT_TYPE)
@@ -995,24 +2879,25 @@ def _init_components():
     broadcast_sync({"type": "capital_guard", **_capital_guard.status()})
     broadcast_sync({"type":"status","message":"✅ พร้อมแล้ว – กด START AI","level":"success"})
 
-    # Fetch initial OTC candle history (30-second candles from IQ Option)
-    broadcast_sync({"type":"status","message":"📊 โหลดประวัติกราฟ OTC…","level":"info"})
+    # Fetch initial candle history for all assets (30-second candles from IQ Option)
+    broadcast_sync({"type":"status","message":"📊 โหลดประวัติกราฟ OTC + Forex…","level":"info"})
     _fetch_initial_candles()
     broadcast_sync({"type":"candle_history","data":_candle_history})
 
     # Update checks with live asset resolution results
     live_results = list(_check_results)
-    for display_name in OTC_ASSETS:
+    for display_name in ALL_ASSETS:
         api_name = _resolved_asset_names.get(display_name)
+        asset_label = "OTC" if is_otc_asset(display_name) else "Forex"
         if api_name:
             live_results.append({
-                "name": f"เชื่อมต่อ {display_name}",
+                "name": f"เชื่อมต่อ {display_name} [{asset_label}]",
                 "passed": True,
                 "message": f"→ {api_name}",
             })
         else:
             live_results.append({
-                "name": f"เชื่อมต่อ {display_name}",
+                "name": f"เชื่อมต่อ {display_name} [{asset_label}]",
                 "passed": False,
                 "message": "ไม่พบ asset นี้ใน IQ Option — ลองใหม่อีกครั้ง",
             })
@@ -1026,13 +2911,13 @@ def _init_components():
 
 def _price_loop():
     """
-    Continuously fetch IQ Option OTC candles and broadcast live price updates.
-    Uses 30-second candles (half-minute) for better granularity.
-    Resolves the correct IQ Option API name for each OTC asset automatically.
+    Continuously fetch IQ Option candles for OTC and Forex assets and broadcast
+    live price updates.  Uses 30-second candles for better granularity.
+    Resolves the correct IQ Option API name for each asset automatically.
     """
     tick = 0
-    while True:
-        for display_name in OTC_ASSETS:
+    while _ai_running:
+        for display_name in ALL_ASSETS:
             api_name = _resolve_asset_name(display_name)
             if not api_name:
                 continue
@@ -1057,6 +2942,7 @@ def _price_loop():
                     logger.warning("Price sanity fail %s: %.5f not in [%.2f, %.2f] — re-resolving",
                                    display_name, cur_close, lo, hi)
                     _resolved_asset_names.pop(display_name, None)
+                    _resolve_failed_at.pop(display_name, None)   # allow immediate re-probe
                     continue
 
                 candle = {
@@ -1076,6 +2962,7 @@ def _price_loop():
                 broadcast_sync({
                     "type":       "price",
                     "asset":      display_name,
+                    "asset_type": "OTC" if is_otc_asset(display_name) else "FOREX",
                     "api_name":   api_name,
                     "price":      round(cur_close, 5),
                     "change_pct": round(change_pct, 4),
@@ -1100,6 +2987,10 @@ def _price_loop():
 def start_server(host: str = "0.0.0.0", port: int = 8000):
     setup_logging(log_dir=config.LOG_DIR)
     logger.info("Starting web dashboard at http://%s:%d", host, port)
+    import sys
+    if sys.platform == "win32":
+        import asyncio as _asyncio
+        _asyncio.set_event_loop_policy(_asyncio.WindowsSelectorEventLoopPolicy())
     uvicorn.run(app, host=host, port=port, log_level="warning")
 
 

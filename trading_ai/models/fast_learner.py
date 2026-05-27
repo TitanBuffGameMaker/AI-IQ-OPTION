@@ -177,21 +177,41 @@ class FastLearner:
         done:     bool,
     ) -> Dict[str, float]:
         """
-        1-step TD Actor-Critic update + push to PER buffer.
+        N-step TD Actor-Critic update + push to PER buffer.
+        Accumulates N steps before training; uses discounted N-step return
+        as target, bootstrapping with V(s_{t+N}) when episode continues.
         Triggers a mini-batch replay every MINI_BATCH_FREQ calls.
         """
-        self.network.train()
+        self._n_step_buf.append((obs.copy(), action, float(reward), next_obs.copy(), done))
 
-        obs_t      = torch.from_numpy(obs.astype(np.float32)).unsqueeze(0).to(self.device)
-        next_obs_t = torch.from_numpy(next_obs.astype(np.float32)).unsqueeze(0).to(self.device)
-        action_t   = torch.tensor([action], dtype=torch.long, device=self.device)
-        reward_t   = torch.tensor([reward], dtype=torch.float32, device=self.device)
+        # Wait until we have N steps or episode ends
+        if len(self._n_step_buf) < self.N_STEP and not done:
+            return {}
+
+        # Compute N-step discounted return G from the oldest buffered step
+        obs_0, act_0, _, _, _ = self._n_step_buf[0]
+        G = 0.0
+        gamma_k = 1.0
+        last_next_obs, last_done = next_obs, done
+        for (_, _, r_k, nxt_k, d_k) in self._n_step_buf:
+            G += gamma_k * r_k
+            gamma_k *= self.DISCOUNT
+            last_next_obs, last_done = nxt_k, d_k
+            if d_k:
+                break
+
+        self.network.train()
+        obs_t      = torch.from_numpy(obs_0.astype(np.float32)).unsqueeze(0).to(self.device)
+        next_obs_t = torch.from_numpy(last_next_obs.astype(np.float32)).unsqueeze(0).to(self.device)
+        action_t   = torch.tensor([act_0], dtype=torch.long, device=self.device)
+        reward_t   = torch.tensor([G], dtype=torch.float32, device=self.device)
 
         logits, value = self.network(obs_t)
 
         with torch.no_grad():
             _, next_value = self.network(next_obs_t)
-            target = reward_t + (0.0 if done else self.DISCOUNT * next_value)
+            bootstrap = 0.0 if last_done else (gamma_k * next_value)
+            target = reward_t + bootstrap
 
         advantage  = (target - value).detach()
         td_error   = advantage.abs().item()
@@ -208,8 +228,8 @@ class FastLearner:
         nn.utils.clip_grad_norm_(self.network.parameters(), 0.5)
         self.optimizer.step()
 
-        # Push to PER buffer
-        self._per_buffer.push(obs, action, reward, next_obs, td_error)
+        # Push N-step base experience to PER buffer
+        self._per_buffer.push(obs_0, act_0, G, last_next_obs, td_error)
 
         self._total_updates += 1
 

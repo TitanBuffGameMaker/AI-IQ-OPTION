@@ -1021,3 +1021,524 @@ body {
   text-align: center;
 }
 .cg-input:focus { outline: none; border-color: var(--red); }
+
+/* ══════════════════════════════════════════════════════════════
+   FLOATING CHAT WIDGET
+   ══════════════════════════════════════════════════════════════ */
+
+#chat-widget {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  z-index: 9999;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 10px;
+}
+
+/* ── Toggle Button ── */
+.chat-float-btn {
+  width: 52px; height: 52px;
+  border-radius: 50%;
+  background: var(--purple);
+  border: none;
+  color: #fff;
+  font-size: 22px;
+  cursor: pointer;
+  position: relative;
+  box-shadow: 0 4px 18px rgba(124,77,255,0.55);
+  transition: transform 0.2s, background 0.2s;
+  flex-shrink: 0;
+}
+.chat-float-btn:hover  { background: #6c3de8; transform: scale(1.08); }
+.chat-float-btn:active { transform: scale(0.94); }
+
+.chat-notif {
+  position: absolute;
+  top: -4px; right: -4px;
+  background: var(--red);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  min-width: 18px; height: 18px;
+  border-radius: 9px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 4px;
+}
+
+/* ── Chat Panel ── */
+.chat-panel {
+  width: 320px;
+  height: 460px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+  animation: chatSlideIn 0.18s ease;
+}
+
+@keyframes chatSlideIn {
+  from { opacity: 0; transform: translateY(20px) scale(0.96); }
+  to   { opacity: 1; transform: translateY(0)    scale(1);    }
+}
+
+/* ── Panel Header ── */
+.chat-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  background: var(--card);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.chat-panel-title {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.chat-dot-live {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: var(--green);
+  box-shadow: 0 0 6px var(--green);
+  animation: pulseDot 2s infinite;
+}
+
+@keyframes pulseDot {
+  0%,100% { opacity: 1; }
+  50%      { opacity: 0.4; }
+}
+
+.chat-close-btn {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  font-size: 16px;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 4px;
+  transition: background 0.15s;
+}
+.chat-close-btn:hover { background: var(--border); color: var(--text); }
+
+/* ── Messages Area ── */
+.chat-messages {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 12px 10px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  scroll-behavior: smooth;
+  min-height: 0;   /* essential for flex scroll to work */
+}
+
+.chat-messages::-webkit-scrollbar { width: 3px; }
+.chat-messages::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 3px;
+}
+
+/* ── Bubbles ── */
+.chat-bubble {
+  max-width: 90%;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.chat-bubble.ai   { align-self: flex-start; }
+.chat-bubble.user { align-self: flex-end; }
+
+.chat-text {
+  padding: 9px 12px;
+  border-radius: 14px;
+  font-size: 12px;
+  line-height: 1.6;
+  word-break: break-word;
+  white-space: pre-wrap;
+}
+
+.chat-bubble.ai .chat-text {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-bottom-left-radius: 4px;
+  color: var(--text);
+}
+.chat-bubble.user .chat-text {
+  background: var(--purple);
+  border-bottom-right-radius: 4px;
+  color: #fff;
+}
+
+.chat-time {
+  font-size: 10px;
+  color: var(--text-muted);
+  padding: 0 3px;
+}
+.chat-bubble.user .chat-time { text-align: right; }
+
+/* ── Input Row ── */
+.chat-panel-input {
+  display: flex;
+  gap: 6px;
+  padding: 8px 10px 10px;
+  border-top: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.chat-input {
+  flex: 1;
+  padding: 8px 12px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  color: var(--text);
+  font-size: 12px;
+  outline: none;
+  transition: border-color 0.2s;
+}
+.chat-input:focus       { border-color: var(--purple); }
+.chat-input::placeholder { color: var(--text-muted); }
+
+.chat-send-btn {
+  width: 34px; height: 34px;
+  border-radius: 50%;
+  background: var(--purple);
+  border: none;
+  color: #fff;
+  font-size: 13px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  transition: background 0.15s, transform 0.1s;
+}
+.chat-send-btn:hover  { background: #6c3de8; }
+.chat-send-btn:active { transform: scale(0.9); }
+
+/* ── Rules / AI Ethics Tab ─────────────────────────────────── */
+.rules-section {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.rules-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  background: rgba(124, 77, 255, 0.08);
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--purple);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.desire-pending-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  background: var(--red);
+  color: #fff;
+  border-radius: 9px;
+  font-size: 10px;
+  font-weight: 700;
+  animation: pulseDot 1.5s infinite;
+}
+
+.desires-list { padding: 8px; display: flex; flex-direction: column; gap: 6px; }
+.desires-empty { padding: 12px 8px; font-size: 11px; color: var(--text-muted); text-align: center; }
+
+.desire-card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-size: 11px;
+}
+.desire-card.pending  { border-left: 3px solid var(--gold); }
+.desire-card.approved { border-left: 3px solid var(--green); opacity: 0.75; }
+.desire-card.denied   { border-left: 3px solid var(--red);   opacity: 0.65; }
+
+.desire-title { font-size: 12px; font-weight: 700; color: var(--text); margin-bottom: 4px; }
+.desire-desc  { color: var(--text-dim); line-height: 1.5; margin-bottom: 6px; font-size: 10px; }
+
+.desire-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 10px;
+  color: var(--text-muted);
+  flex-wrap: wrap;
+}
+
+.desire-urgency {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.desire-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.btn-approve, .btn-deny {
+  flex: 1;
+  padding: 4px 8px;
+  border-radius: 6px;
+  border: none;
+  font-size: 10px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+.btn-approve { background: rgba(0,200,122,0.15); color: var(--green); border: 1px solid var(--green-dim); }
+.btn-deny    { background: rgba(242,54,69,0.12);  color: var(--red);   border: 1px solid var(--red-dim); }
+.btn-approve:hover { background: rgba(0,200,122,0.3); }
+.btn-deny:hover    { background: rgba(242,54,69,0.25); }
+
+.ethics-list { padding: 6px 8px; display: flex; flex-direction: column; gap: 4px; }
+
+.ethics-principle {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 7px 8px;
+  background: rgba(255,255,255,0.025);
+  border-radius: 6px;
+  font-size: 11px;
+}
+.ethics-icon { font-size: 14px; flex-shrink: 0; margin-top: 1px; }
+.ethics-body { flex: 1; }
+.ethics-title { font-weight: 700; color: var(--text); margin-bottom: 2px; }
+.ethics-desc  { color: var(--text-dim); font-size: 10px; line-height: 1.4; }
+
+/* ── Graduation Card ─────────────────────────────────────────── */
+.graduation-card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  margin: 8px 0 4px;
+}
+.grad-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 6px;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text);
+}
+.grad-pct {
+  font-size: 14px;
+  font-weight: 800;
+  color: var(--purple);
+}
+.grad-bar-track {
+  height: 6px;
+  background: rgba(255,255,255,0.06);
+  border-radius: 3px;
+  overflow: hidden;
+  margin-bottom: 8px;
+}
+.grad-bar-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #7c4dff, #00c87a);
+  border-radius: 3px;
+  transition: width 0.6s ease;
+}
+.grad-criteria {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.grad-criterion {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+  padding: 3px 4px;
+  border-radius: 4px;
+}
+.grad-criterion.passed  { color: var(--green); }
+.grad-criterion.failed  { color: var(--text-muted); }
+.grad-criterion.bonus   { color: var(--gold); }
+.grad-criterion-check   { font-size: 12px; flex-shrink: 0; }
+.grad-criterion-val     { margin-left: auto; font-size: 9px; color: var(--text-muted); }
+
+/* Graduated state */
+.graduation-card.graduated {
+  border-color: var(--green);
+  background: rgba(0, 200, 122, 0.07);
+}
+.graduation-card.graduated .grad-pct { color: var(--green); }
+
+/* ── Fear System Bar ─────────────────────────────────────────── */
+.fear-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--text-dim);
+  margin-bottom: 4px;
+}
+.fear-bar-track {
+  height: 5px;
+  background: rgba(255,255,255,0.06);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.fear-bar-fill {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.4s ease, background 0.4s ease;
+}
+
+/* ── NAS Panel ───────────────────────────────────────────────── */
+.nas-card {
+  background: var(--card);
+  border: 1px solid rgba(124,77,255,0.35);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  margin: 6px 0 4px;
+}
+.nas-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--purple);
+}
+.nas-gen-badge {
+  background: rgba(124,77,255,0.2);
+  color: var(--purple);
+  border-radius: 10px;
+  padding: 1px 8px;
+  font-size: 10px;
+  font-weight: 700;
+}
+.nas-champion {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  background: rgba(255,193,7,0.08);
+  border: 1px solid rgba(255,193,7,0.2);
+  border-radius: 6px;
+  margin-bottom: 6px;
+  font-size: 11px;
+}
+.nas-label    { color: var(--text-muted); font-size: 10px; }
+.nas-config-label { font-weight: 700; color: var(--text); font-family: monospace; font-size: 11px; }
+.nas-score    { margin-left: auto; font-weight: 700; color: var(--gold); }
+
+.nas-challengers { display: flex; flex-direction: column; gap: 4px; margin-bottom: 6px; }
+
+.nas-challenger {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  background: rgba(255,255,255,0.03);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  font-size: 10px;
+}
+.nas-challenger .nas-config-label { font-size: 10px; }
+.nas-challenger-progress {
+  flex: 1;
+  height: 3px;
+  background: rgba(255,255,255,0.06);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.nas-challenger-progress-fill {
+  height: 100%;
+  background: var(--purple);
+  border-radius: 2px;
+  transition: width 0.4s;
+}
+
+.nas-upgrade {
+  padding: 5px 8px;
+  background: rgba(0,200,122,0.1);
+  border: 1px solid var(--green-dim);
+  border-radius: 5px;
+  font-size: 10px;
+  color: var(--green);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 5px;
+  animation: pulseDot 2s infinite;
+}
+
+.nas-history { display: flex; flex-direction: column; gap: 2px; }
+.nas-history-item {
+  font-size: 9px;
+  color: var(--text-muted);
+  padding: 2px 4px;
+  border-left: 2px solid var(--purple);
+  padding-left: 6px;
+}
+
+/* ── Dual-Asset Mode: OTC + Forex ───────────────────────────── */
+.forex-badge {
+  padding: 2px 7px;
+  background: #1565c0;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 700;
+  color: #fff;
+  letter-spacing: .5px;
+}
+
+.asset-group-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  font-size: 11px;
+  color: var(--text-muted);
+  font-weight: 600;
+  letter-spacing: .3px;
+}
+
+.chart-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  padding: 4px 8px 8px;
+}
+
+@media (max-width: 900px) {
+  .chart-grid { grid-template-columns: 1fr; }
+  #chart-grid-forex { grid-template-columns: 1fr; }
+}

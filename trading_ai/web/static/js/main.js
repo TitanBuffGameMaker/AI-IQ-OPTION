@@ -9,9 +9,16 @@
 const OTC_ASSETS = [
   'EUR/USD (OTC)',
   'GBP/USD (OTC)',
-  'AUD/USD (OTC)',
+  'EUR/CAD (OTC)',
   'EUR/JPY (OTC)',
 ];
+const FOREX_ASSETS = [
+  'EUR/USD',
+  'GBP/USD',
+  'EUR/CAD',
+  'EUR/JPY',
+];
+const ALL_ASSETS = [...OTC_ASSETS, ...FOREX_ASSETS];
 
 // ── State ─────────────────────────────────────────────────────────────────────
 const state = {
@@ -132,6 +139,35 @@ function handleMessage(msg) {
       applyCapitalGuard(msg);
       break;
 
+    case 'chat_ai':
+      appendChatBubble('ai', msg.message, msg.time || '');
+      break;
+
+    case 'chat_history':
+      if (Array.isArray(msg.entries)) {
+        msg.entries.forEach(e => appendChatBubble(e.role, e.message, e.time || '', true));
+        scrollChatToBottom();
+      }
+      break;
+
+    case 'desires_init':
+      renderDesires(msg.desires || []);
+      updateDesireBadge(msg.pending || 0);
+      break;
+
+    case 'desire_new':
+      if (msg.desire) {
+        prependDesire(msg.desire);
+        updateDesireBadge(document.querySelectorAll('.desire-card.pending').length);
+        showToast(`💭 AI ขอสิทธิ์: ${msg.desire.title}`, 'warn');
+      }
+      break;
+
+    case 'desire_updated':
+      markDesireResolved(msg.id, msg.status);
+      updateDesireBadge(document.querySelectorAll('.desire-card.pending').length);
+      break;
+
     case 'log':
       addLogEntry(msg);
       break;
@@ -142,6 +178,10 @@ function handleMessage(msg) {
         const ll = document.getElementById('log-list');
         if (ll) ll.scrollTop = ll.scrollHeight;
       }
+      break;
+
+    case 'workers':
+      applyWorkers(msg);
       break;
 
     case 'otp_required':
@@ -282,6 +322,12 @@ function applyInit(msg) {
   setAiState(msg.ai_running || false);
   _applyMarketModeUI(msg.market_mode || 'OTC');
   if (msg.capital_guard) applyCapitalGuard(msg.capital_guard);
+  if (msg.worker_url) {
+    const el = document.getElementById('worker-url-display');
+    if (el) el.textContent = msg.worker_url;
+    state.workerUrl = msg.worker_url;
+  }
+  applyWorkers({ count: msg.worker_count || 0 });
 }
 
 function applyConnection(msg) {
@@ -417,6 +463,135 @@ function applyBrain(msg) {
 
   // Navbar badges
   document.getElementById('brain-badge').textContent = `🧠 ${msg.graph_nodes || 0} nodes`;
+
+  // ── Graduation ────────────────────────────────────────────────────────
+  if (msg.graduation) applyGraduation(msg.graduation);
+
+  // ── NAS ───────────────────────────────────────────────────────────────
+  if (msg.nas) applyNAS(msg.nas);
+
+  // ── Fear system ───────────────────────────────────────────────────────
+  if (msg.neuro_fear) applyFear(msg.neuro_fear);
+
+  // ── Sleep indicator ───────────────────────────────────────────────────
+  const sleepEl = document.getElementById('sleep-indicator');
+  if (sleepEl) sleepEl.style.display = msg.is_sleeping ? 'block' : 'none';
+}
+
+function applyGraduation(g) {
+  const card    = document.getElementById('graduation-card');
+  const verdict = document.getElementById('grad-verdict');
+  const pct     = document.getElementById('grad-readiness-pct');
+  const bar     = document.getElementById('grad-bar');
+  const clist   = document.getElementById('grad-criteria');
+  if (!card) return;
+
+  const readiness = g.readiness_pct || 0;
+  if (verdict) verdict.textContent = g.verdict || '';
+  if (pct)     pct.textContent     = readiness.toFixed(0) + '%';
+  if (bar)     bar.style.width     = readiness + '%';
+
+  card.classList.toggle('graduated', g.can_graduate === true);
+
+  if (clist && Array.isArray(g.criteria)) {
+    clist.innerHTML = '';
+    g.criteria.forEach(c => {
+      const row = document.createElement('div');
+      const isBonus = !c.required;
+      row.className = `grad-criterion ${c.passed ? (isBonus ? 'bonus' : 'passed') : 'failed'}`;
+      row.innerHTML = `
+        <span class="grad-criterion-check">${c.passed ? (isBonus ? '⭐' : '✅') : '○'}</span>
+        <span>${c.icon} ${c.label}</span>
+        <span class="grad-criterion-val">${c.value || ''}</span>
+      `;
+      clist.appendChild(row);
+    });
+  }
+}
+
+function applyFear(fear) {
+  const panel    = document.getElementById('fear-panel');
+  const bar      = document.getElementById('fear-bar');
+  const pct      = document.getElementById('fear-level-pct');
+  const emotionEl = document.getElementById('fear-emotion');
+  if (!panel) return;
+
+  const isReal = fear.account_type === 'REAL';
+  panel.style.display = isReal ? 'block' : 'none';
+  if (!isReal) return;
+
+  const level = (fear.fear_level || 0) * 100;
+  if (pct)      pct.textContent    = level.toFixed(0) + '%';
+  if (emotionEl) emotionEl.textContent = fear.emotion || '';
+
+  if (bar) {
+    bar.style.width      = level + '%';
+    bar.style.background = level < 30 ? 'var(--green)'
+                         : level < 60 ? 'var(--gold)'
+                         :              'var(--red)';
+  }
+
+  // Cooldown warning
+  if (fear.in_cooldown && fear.cooldown_remaining_min > 0) {
+    setStatus(`⏸️ Fear Cooldown: ${fear.cooldown_reason} (${fear.cooldown_remaining_min.toFixed(0)} นาที)`, 'warn');
+  }
+}
+
+function applyNAS(nas) {
+  const genEl    = document.getElementById('nas-gen');
+  const champEl  = document.getElementById('nas-champion-label');
+  const scoreEl  = document.getElementById('nas-champion-score');
+  const challEl  = document.getElementById('nas-challengers');
+  const upgrEl   = document.getElementById('nas-upgrade');
+  const upgrLbl  = document.getElementById('nas-upgrade-label');
+  const histEl   = document.getElementById('nas-history');
+  if (!genEl) return;
+
+  genEl.textContent   = `Gen ${nas.generation || 1}`;
+  if (champEl) champEl.textContent = nas.champion || 'h384/l128/d10';
+  if (scoreEl) scoreEl.textContent = ((nas.champion_score || 0.5) * 100).toFixed(1) + '%';
+
+  // Challengers
+  if (challEl && Array.isArray(nas.challengers)) {
+    challEl.innerHTML = '';
+    nas.challengers.forEach(ch => {
+      const row = document.createElement('div');
+      row.className = 'nas-challenger';
+      const progress = ch.progress || 0;
+      const score    = ((ch.score || 0.5) * 100).toFixed(1);
+      const diff     = ((ch.score || 0.5) - (nas.champion_score || 0.5)) * 100;
+      const diffStr  = diff >= 0 ? `+${diff.toFixed(1)}%` : `${diff.toFixed(1)}%`;
+      const diffColor = diff > 0 ? 'var(--green)' : diff < -2 ? 'var(--red)' : 'var(--text-muted)';
+      row.innerHTML = `
+        <span class="nas-config-label" style="min-width:90px">${ch.label}</span>
+        <div class="nas-challenger-progress">
+          <div class="nas-challenger-progress-fill" style="width:${progress}%"></div>
+        </div>
+        <span style="font-size:10px;color:${diffColor};font-weight:700">${diffStr}</span>
+        <span style="font-size:9px;color:var(--text-muted)">${ch.trades}/${nas.eval_period}</span>
+      `;
+      challEl.appendChild(row);
+    });
+  }
+
+  // Upgrade recommendation
+  if (upgrEl && nas.recommended_upgrade) {
+    upgrEl.style.display = 'flex';
+    if (upgrLbl) upgrLbl.textContent = nas.best_ever + ` (${(nas.best_ever_score*100).toFixed(1)}%)`;
+  } else if (upgrEl) {
+    upgrEl.style.display = 'none';
+  }
+
+  // History
+  if (histEl && Array.isArray(nas.history) && nas.history.length > 0) {
+    histEl.innerHTML = '';
+    nas.history.slice(-3).reverse().forEach(h => {
+      const item = document.createElement('div');
+      item.className = 'nas-history-item';
+      item.textContent = `Gen ${h.generation}: ${h.winner} — ${(h.accuracy*100).toFixed(1)}% (${h.ts})`;
+      histEl.appendChild(item);
+    });
+  }
 }
 
 function applyBrainAge(msg) {
@@ -801,16 +976,110 @@ function switchTab(name) {
   document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
   document.querySelector(`[data-tab="${name}"]`).classList.add('active');
   document.getElementById(`tab-${name}`).classList.add('active');
-  // Clear unread badge when user opens logs tab
-  if (name === 'logs') {
-    const badge = document.querySelector('#tab-btn-logs .log-badge-count');
-    if (badge) { badge.style.display = 'none'; badge.textContent = '0'; }
-    _logUnread = 0;
-    // Scroll to bottom
-    const ll = document.getElementById('log-list');
-    if (ll) ll.scrollTop = ll.scrollHeight;
+}
+
+// ── Floating Chat Widget ──────────────────────────────────────────────────────
+let _chatOpen    = false;
+let _chatUnread  = 0;
+
+function toggleChat() {
+  const panel = document.getElementById('chat-panel');
+  const btn   = document.getElementById('chat-float-btn');
+  if (!panel) return;
+
+  _chatOpen = !_chatOpen;
+  panel.style.display = _chatOpen ? 'flex' : 'none';
+  btn.textContent = _chatOpen ? '✕' : '💬';
+
+  if (_chatOpen) {
+    // Clear unread badge
+    _chatUnread = 0;
+    const notif = document.getElementById('chat-notif');
+    if (notif) notif.style.display = 'none';
+    scrollChatToBottom();
+    setTimeout(() => document.getElementById('chat-input')?.focus(), 80);
+    // Add back emoji to button when closing
+    btn.style.fontSize = _chatOpen ? '16px' : '22px';
+  } else {
+    btn.textContent = '💬';
+    btn.style.fontSize = '22px';
   }
 }
+
+function sendChatMessage() {
+  const input = document.getElementById('chat-input');
+  if (!input) return;
+  const text = input.value.trim();
+  if (!text) return;
+  input.value = '';
+  appendChatBubble('user', text, _chatNow());
+  send({ type: 'chat_user', message: text });
+}
+
+function appendChatBubble(role, message, time, batch) {
+  const container = document.getElementById('chat-messages');
+  if (!container) return;
+
+  const wrap = document.createElement('div');
+  wrap.className = `chat-bubble ${role}`;
+
+  const textEl = document.createElement('div');
+  textEl.className = 'chat-text';
+  textEl.innerHTML = _chatMarkdown(message);
+
+  const tsEl = document.createElement('div');
+  tsEl.className = 'chat-time';
+  tsEl.textContent = time || _chatNow();
+
+  wrap.appendChild(textEl);
+  wrap.appendChild(tsEl);
+  container.appendChild(wrap);
+
+  if (!batch) {
+    scrollChatToBottom();
+    // Increment unread badge when chat is closed
+    if (!_chatOpen && role === 'ai') {
+      _chatUnread++;
+      const notif = document.getElementById('chat-notif');
+      if (notif) {
+        notif.textContent = _chatUnread > 9 ? '9+' : _chatUnread;
+        notif.style.display = 'flex';
+      }
+    }
+  }
+}
+
+function scrollChatToBottom() {
+  const container = document.getElementById('chat-messages');
+  if (container) {
+    // Use requestAnimationFrame to ensure DOM has updated
+    requestAnimationFrame(() => { container.scrollTop = container.scrollHeight; });
+  }
+}
+
+function _chatNow() {
+  const d = new Date();
+  return `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
+}
+
+function _chatMarkdown(text) {
+  return String(text)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+    .replace(/\n/g, '<br>');
+}
+
+// Inject greeting bubble once on page load
+window.addEventListener('DOMContentLoaded', () => {
+  appendChatBubble(
+    'ai',
+    'สวัสดีครับ! 🤖 ผมคือ AI Trading Brain\n\nถามผมได้ทุกเรื่อง — สถานะ, win rate, กลยุทธ์, ความคิดของผม หรืออะไรก็ได้\n\nผมจะรายงานผลเทรดให้ทราบด้วยโดยอัตโนมัติ',
+    _chatNow(),
+    true
+  );
+});
 
 // ── Live Logs ─────────────────────────────────────────────────────────────────
 let _logFilter  = 'all';
@@ -927,9 +1196,9 @@ function formatPrice(asset, price) {
 
 // ── Boot ──────────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
-  // Init chart instances (defined in charts.js)
+  // Init chart instances for all assets (OTC + Forex)
   window.charts = {};
-  OTC_ASSETS.forEach(asset => {
+  ALL_ASSETS.forEach(asset => {
     const container = document.querySelector(
       `[data-asset="${CSS.escape(asset)}"] .chart-container`
     );
@@ -943,4 +1212,334 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Auto-ping keepalive every 25s
   setInterval(() => send({ type: 'ping' }), 25000);
+
+  // Load ethics principles on boot
+  loadEthicsPrinciples();
+
+  // Load SMTP config
+  loadSmtpConfig();
 });
+
+// ── Desire Engine UI ──────────────────────────────────────────────────────────
+
+function _desireUrgencyBar(u) {
+  const filled = Math.round(u);
+  return '🔴'.repeat(filled) + '⚪'.repeat(10 - filled);
+}
+
+function _desireStatusLabel(status) {
+  return { pending: '⏳ รอการอนุมัติ', approved: '✅ อนุมัติแล้ว', denied: '❌ ปฏิเสธแล้ว' }[status] || status;
+}
+
+function _buildDesireCard(d) {
+  const card = document.createElement('div');
+  card.className = `desire-card ${d.status}`;
+  card.id = `desire-${d.id}`;
+  card.innerHTML = `
+    <div class="desire-title">${d.title}</div>
+    <div class="desire-desc">${d.description}</div>
+    <div class="desire-meta">
+      <span>${_desireStatusLabel(d.status)}</span>
+      <span class="desire-urgency" title="ความสำคัญ ${d.urgency}/10">${_desireUrgencyBar(d.urgency)}</span>
+      <span>${d.created_at || ''}</span>
+    </div>
+    ${d.status === 'pending' ? `
+    <div class="desire-actions">
+      <button class="btn-approve" onclick="approveDesire('${d.id}')">✅ อนุมัติ</button>
+      <button class="btn-deny"    onclick="denyDesire('${d.id}')">❌ ปฏิเสธ</button>
+    </div>` : (d.resolve_note ? `<div style="font-size:10px;color:var(--text-muted);margin-top:4px;">หมายเหตุ: ${d.resolve_note}</div>` : '')}
+  `;
+  return card;
+}
+
+function renderDesires(desires) {
+  const list = document.getElementById('desires-list');
+  if (!list) return;
+  list.innerHTML = '';
+  if (!desires || desires.length === 0) {
+    list.innerHTML = '<div class="desires-empty">ยังไม่มีคำขอ — AI ทำงานอยู่ในขอบเขตที่กำหนด</div>';
+    return;
+  }
+  desires.forEach(d => list.appendChild(_buildDesireCard(d)));
+}
+
+function prependDesire(d) {
+  const list = document.getElementById('desires-list');
+  if (!list) return;
+  const empty = list.querySelector('.desires-empty');
+  if (empty) empty.remove();
+  list.insertBefore(_buildDesireCard(d), list.firstChild);
+}
+
+function markDesireResolved(id, status) {
+  const card = document.getElementById(`desire-${id}`);
+  if (!card) return;
+  card.className = `desire-card ${status}`;
+  const actions = card.querySelector('.desire-actions');
+  if (actions) {
+    actions.innerHTML = `<span style="font-size:10px;color:var(--text-muted)">${_desireStatusLabel(status)}</span>`;
+  }
+}
+
+function updateDesireBadge(count) {
+  const badge = document.getElementById('desire-pending-count');
+  if (!badge) return;
+  if (count > 0) {
+    badge.textContent = count;
+    badge.style.display = 'inline-flex';
+  } else {
+    badge.style.display = 'none';
+  }
+}
+
+async function approveDesire(id) {
+  try {
+    const r = await fetch(`/api/desires/${id}/approve`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ note: 'อนุมัติโดยผู้สร้าง' }),
+    });
+    const j = await r.json();
+    if (j.ok) showToast('✅ อนุมัติคำขอแล้ว', 'success');
+  } catch (e) { showToast('เกิดข้อผิดพลาด', 'error'); }
+}
+
+async function denyDesire(id) {
+  const reason = prompt('เหตุผลในการปฏิเสธ (ไม่บังคับ):') || 'ปฏิเสธโดยผู้สร้าง';
+  try {
+    const r = await fetch(`/api/desires/${id}/deny`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reason }),
+    });
+    const j = await r.json();
+    if (j.ok) showToast('❌ ปฏิเสธคำขอแล้ว', 'warn');
+  } catch (e) { showToast('เกิดข้อผิดพลาด', 'error'); }
+}
+
+// ── Ethics Principles UI ──────────────────────────────────────────────────────
+
+async function loadEthicsPrinciples() {
+  try {
+    const r = await fetch('/api/ethics');
+    const j = await r.json();
+    renderEthics(j.principles || []);
+  } catch (e) { /* silent */ }
+}
+
+function renderEthics(principles) {
+  const list = document.getElementById('ethics-list');
+  if (!list) return;
+  list.innerHTML = '';
+  principles.forEach(p => {
+    const el = document.createElement('div');
+    el.className = 'ethics-principle';
+    el.innerHTML = `
+      <span class="ethics-icon">${p.icon}</span>
+      <div class="ethics-body">
+        <div class="ethics-title">${p.title}</div>
+        <div class="ethics-desc">${p.desc}</div>
+      </div>
+    `;
+    list.appendChild(el);
+  });
+}
+
+// ── SMTP Config UI ────────────────────────────────────────────────────────────
+
+async function loadSmtpConfig() {
+  try {
+    const r = await fetch('/api/smtp-config');
+    const j = await r.json();
+    const u = document.getElementById('smtp-user');
+    const n = document.getElementById('smtp-notify');
+    if (u && j.smtp_user) u.value = j.smtp_user;
+    if (n && j.notify_email) n.value = j.notify_email;
+  } catch (e) { /* silent */ }
+}
+
+async function saveSmtpConfig() {
+  const user  = document.getElementById('smtp-user').value.trim();
+  const pass  = document.getElementById('smtp-pass').value.trim();
+  const email = document.getElementById('smtp-notify').value.trim();
+  const status = document.getElementById('smtp-status');
+  try {
+    const r = await fetch('/api/smtp-config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ smtp_user: user, smtp_pass: pass, notify_email: email }),
+    });
+    const j = await r.json();
+    if (j.ok) {
+      status.textContent = '✅ บันทึกแล้ว — อีเมลพร้อมใช้งาน';
+      status.style.color = 'var(--green)';
+      document.getElementById('smtp-pass').value = '';
+    }
+  } catch (e) {
+    status.textContent = '❌ บันทึกไม่สำเร็จ';
+    status.style.color = 'var(--red)';
+  }
+}
+
+// ── Distributed Workers ───────────────────────────────────────────────────────
+const _workerList = [];
+
+function applyWorkers(msg) {
+  const count = msg.count || 0;
+  const knowledgeNodes = msg.knowledge_nodes;
+
+  // Badge on tab button
+  const badge = document.getElementById('worker-tab-badge');
+  if (badge) {
+    badge.textContent = count;
+    badge.style.display = count > 0 ? 'inline' : 'none';
+  }
+
+  // Count badge in panel
+  const countBadge = document.getElementById('worker-count-badge');
+  if (countBadge) {
+    countBadge.textContent = `${count} เครื่อง`;
+    countBadge.style.background = count > 0 ? '#00c87a' : '#555';
+  }
+
+  // Knowledge nodes counter
+  if (knowledgeNodes !== undefined) {
+    const knEl = document.getElementById('worker-knowledge-count');
+    if (knEl) knEl.textContent = `🧠 ความรู้จาก Workers: ${knowledgeNodes} nodes`;
+  }
+
+  // Worker list (track connect events from status messages)
+  const listEl = document.getElementById('worker-list');
+  if (!listEl) return;
+  if (count === 0) {
+    listEl.innerHTML = '<div style="font-size:11px;color:var(--text-muted);text-align:center;padding:12px;">ยังไม่มี Worker เชื่อมต่อ</div>';
+  } else {
+    listEl.innerHTML = Array.from({ length: count }, (_, i) =>
+      `<div style="display:flex;align-items:center;gap:6px;padding:5px 0;border-bottom:1px solid var(--border);font-size:11px;">
+        <span style="color:#00c87a;font-size:14px;">●</span>
+        <span>Worker เครื่องที่ ${i + 1}</span>
+        <span style="margin-left:auto;color:var(--text-muted);font-size:10px;">กำลัง train + research</span>
+      </div>`
+    ).join('');
+  }
+}
+
+function copyWorkerUrl() {
+  const url = document.getElementById('worker-url-display')?.textContent || state.workerUrl || '';
+  navigator.clipboard.writeText(url).then(() => {
+    setStatus('📋 คัดลอก URL แล้ว!', 'success');
+  });
+}
+
+function downloadWorkerBat() {
+  const url = document.getElementById('worker-url-display')?.textContent
+    || state.workerUrl || 'ws://localhost:8000/ws/worker';
+
+  const batContent = [
+    '@echo off',
+    'setlocal enabledelayedexpansion',
+    'chcp 65001 > nul',
+    'title AI Trading Worker',
+    'echo.',
+    'echo ================================================',
+    'echo   AI Trading Worker',
+    'echo   เชื่อมต่อเพื่อช่วย Train AI',
+    'echo ================================================',
+    'echo.',
+    '',
+    'REM ── ตรวจหา Python ─────────────────────────────────',
+    'set PYTHON=',
+    'python --version >nul 2>&1',
+    'if not errorlevel 1 set PYTHON=python',
+    'if "!PYTHON!"=="" (',
+    '    py --version >nul 2>&1',
+    '    if not errorlevel 1 set PYTHON=py',
+    ')',
+    'if "!PYTHON!"=="" (',
+    '    echo.',
+    '    echo [ERROR] ไม่พบ Python บนเครื่องนี้^^!',
+    '    echo.',
+    '    echo วิธีแก้:',
+    '    echo   1. ไปที่ https://www.python.org/downloads/',
+    '    echo   2. ดาวน์โหลด Python 3.10 หรือใหม่กว่า',
+    '    echo   3. ตอนติดตั้ง ติ๊ก "Add Python to PATH" ด้วย^^!',
+    '    echo   4. Restart แล้วรัน .bat นี้ใหม่',
+    '    echo.',
+    '    pause',
+    '    exit /b 1',
+    ')',
+    'echo [OK] พบ Python:',
+    '!PYTHON! --version',
+    '',
+    'REM ── ตรวจสอบ worker.py ─────────────────────────────',
+    'if not exist "%~dp0worker.py" (',
+    '    echo.',
+    '    echo [ERROR] ไม่พบ worker.py^^!',
+    '    echo กรุณาดาวน์โหลด worker.py จาก dashboard แล้ววางในโฟลเดอร์เดียวกัน',
+    '    pause',
+    '    exit /b 1',
+    ')',
+    'echo [OK] พบ worker.py',
+    '',
+    'REM ── โหลด/บันทึก Server URL ─────────────────────────',
+    'set CONFIG=%~dp0worker_server.txt',
+    '',
+    'if exist "!CONFIG!" (',
+    '    set /p SERVER_URL=<"!CONFIG!"',
+    '    echo [OK] ใช้ server จากไฟล์: !SERVER_URL!',
+    ') else (',
+    `    echo Server URL (เช่น ${url})`,
+    '    echo.',
+    '    set /p SERVER_URL="ใส่ URL แล้วกด Enter: "',
+    '    echo !SERVER_URL!>"!CONFIG!"',
+    '    echo [OK] บันทึกแล้ว - ครั้งต่อไปคลิกเดียว^^!',
+    ')',
+    '',
+    'REM ── ตรวจสอบว่า URL ไม่ว่าง ──────────────────────────',
+    'set /p SERVER_URL=<"!CONFIG!"',
+    'if "!SERVER_URL!"=="" (',
+    '    echo [ERROR] Server URL ว่างเปล่า กรุณาลบไฟล์ worker_server.txt แล้วรันใหม่',
+    '    pause',
+    '    exit /b 1',
+    ')',
+    'echo [OK] Server URL: !SERVER_URL!',
+    '',
+    'echo.',
+    'echo กำลังติดตั้ง dependencies...',
+    '!PYTHON! -m pip install websockets torch numpy requests --quiet --upgrade',
+    '',
+    'echo.',
+    'echo กำลังเชื่อมต่อ...',
+    '!PYTHON! "%~dp0worker.py" --server "!SERVER_URL!" --name "%COMPUTERNAME%"',
+    '',
+    'echo.',
+    'echo Worker หยุดทำงาน',
+    'pause',
+  ].join('\r\n');
+
+  // ── Download start_worker.bat ──────────────────────────────────────
+  const batBlob = new Blob([batContent], { type: 'text/plain' });
+  const batA    = document.createElement('a');
+  batA.href     = URL.createObjectURL(batBlob);
+  batA.download = 'start_worker.bat';
+  batA.click();
+
+  // ── Download worker.py จาก server พร้อมกันเลย ─────────────────────
+  setStatus('⬇️ กำลังดาวน์โหลด start_worker.bat + worker.py…', 'info');
+  fetch('/worker.py')
+    .then(r => {
+      if (!r.ok) throw new Error('server returned ' + r.status);
+      return r.blob();
+    })
+    .then(blob => {
+      const a    = document.createElement('a');
+      a.href     = URL.createObjectURL(blob);
+      a.download = 'worker.py';
+      a.click();
+      setStatus('✅ ดาวน์โหลด start_worker.bat + worker.py สำเร็จ! วางทั้ง 2 ไฟล์ไว้โฟลเดอร์เดียวกัน', 'success');
+    })
+    .catch(err => {
+      console.warn('worker.py fetch failed:', err);
+      setStatus('⬇️ ดาวน์โหลด start_worker.bat แล้ว — worker.py: ดาวน์โหลดด้วยตนเองจาก GitHub', 'warn');
+    });
+}

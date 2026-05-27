@@ -1,15 +1,22 @@
 """
-Trading Environment — ULTRA EDITION
+Trading Environment — Binary Options Edition
 
-สิ่งที่ปรับปรุง:
-  - OBS_SIZE = 40 indicators + 256 chart features = 296
-  - Sharpe Ratio reward shaping
-  - Risk-adjusted reward function
-  - Better observation normalization
-  - Anti-overtrading penalty
-  - Drawdown penalty
+Binary Options rules (IQ Option):
+  WIN  (+CALL or +PUT correct direction): +payout% of stake (fixed, e.g. 80-89%)
+  LOSS (wrong direction):                 -100% of stake (all gone)
+  HOLD (skip this candle):                ±0  (capital preserved — this is free)
+
+Reward scale per step:
+  Win  → base_reward ≈ +0.80 to +0.89
+  Loss → base_reward = -1.00
+  Hold → 0.00  (waiting costs nothing — do NOT penalise)
+
+Break-even win rate: WR > 1/(1 + payout)
+  80% payout → need > 55.6% win rate
+  89% payout → need > 53.0% win rate
 """
 import logging
+import threading
 import time
 from collections import deque
 from typing import Optional, Tuple
@@ -22,7 +29,7 @@ from gymnasium import spaces
 from trading_ai.config import config
 from trading_ai.core.iq_connector import IQOptionConnector
 from trading_ai.indicators.technical import IndicatorEngine, N_FEATURES
-from trading_ai.utils.chart_capture import ChartCapture
+from trading_ai.utils.price_encoder import PriceSequenceEncoder
 
 logger = logging.getLogger(__name__)
 
@@ -41,13 +48,17 @@ class TradingEnv(gym.Env):
 
     metadata = {"render_modes": []}
     ACTIONS  = {0: "hold", 1: "call", 2: "put"}
-    HOLD_PENALTY = -0.02
+    # Binary Options: waiting costs nothing — capital is preserved when you don't trade.
+    # Penalising HOLD teaches the AI to "always trade" which destroys the account.
+    # Set to 0.0 so the AI learns: only trade when expected value is positive.
+    HOLD_PENALTY = 0.0
+    FAIL_PENALTY = -0.05   # trade placement failure (API error, market closed)
 
     def __init__(self, connector: IQOptionConnector):
         super().__init__()
         self.connector       = connector
         self.indicator_engine = IndicatorEngine()
-        self.chart_capture   = ChartCapture(img_size=config.CHART_IMG_SIZE)
+        self.price_encoder   = PriceSequenceEncoder()
 
         self.action_space = spaces.Discrete(3)
         self.observation_space = spaces.Box(
@@ -72,6 +83,7 @@ class TradingEnv(gym.Env):
         self._episode_pnl:        float = 0.0
         self._last_obs:           Optional[np.ndarray] = None
         self._last_candles:       Optional[pd.DataFrame] = None
+        self._trade_amount:       float = config.TRADE_AMOUNT  # overridden by server for Kelly sizing
 
         # สำหรับ Sharpe reward
         self._reward_history: deque = deque(maxlen=config.SHARPE_WINDOW)
@@ -80,6 +92,13 @@ class TradingEnv(gym.Env):
         # สำหรับ drawdown protection
         self._peak_balance:   float = 0.0
         self._trade_count_episode: int = 0
+
+        # Set by server on shutdown so the expiry wait can be interrupted.
+        self._stop_event: threading.Event = threading.Event()
+
+    def stop(self) -> None:
+        """Signal the env to stop waiting — called during server shutdown."""
+        self._stop_event.set()
 
     # ── Asset rotation (for multi-asset AI loop) ────────────────────────────
 
@@ -109,17 +128,20 @@ class TradingEnv(gym.Env):
         terminated  = False
 
         if action == 0:
-            reward = self.HOLD_PENALTY
+            # HOLD: waiting is neutral in binary options (capital preserved)
+            reward = self.HOLD_PENALTY   # = 0.0
             info["skipped"] = True
         else:
             if not self.connector.is_market_open(self._current_asset):
-                reward = self.HOLD_PENALTY
+                # Tried to trade but market closed → treat as forced HOLD
+                reward = self.HOLD_PENALTY   # = 0.0, not a mistake
                 info["skipped"] = True
             else:
-                # Anti-overtrading: ถ้าเทรดบ่อยเกินไปใน 10 steps → penalty
+                # Anti-overtrading: penalise if trading every single candle
+                # (binary options needs patience, not spray-and-pray)
                 trade_rate = sum(self._recent_trades) / max(len(self._recent_trades), 1)
                 if trade_rate > 0.8:
-                    reward = -0.05
+                    reward = self.FAIL_PENALTY
                     info["skipped"] = True
                     logger.debug("Anti-overtrading: trade rate too high (%.1f%%)", trade_rate * 100)
                 else:
@@ -128,22 +150,26 @@ class TradingEnv(gym.Env):
 
         self._recent_trades.append(1 if not info.get("skipped") else 0)
 
-        # Circuit breakers
-        if self._daily_pnl <= -config.DAILY_LOSS_LIMIT:
-            logger.warning("Daily loss limit hit")
-            terminated = True
-        if self._consecutive_losses >= config.MAX_CONSECUTIVE_LOSSES:
-            logger.warning("Too many consecutive losses")
-            terminated = True
+        # Circuit breakers — REAL account only.
+        # PRACTICE: never stop; every trade is a free learning experience.
+        # OTC assets are synthetic — losses don't cost real money in practice.
+        _is_real = config.IQ_ACCOUNT_TYPE.upper() == "REAL"
+        if _is_real:
+            if self._daily_pnl <= -config.DAILY_LOSS_LIMIT:
+                logger.warning("Daily loss limit hit")
+                terminated = True
+            if self._consecutive_losses >= config.MAX_CONSECUTIVE_LOSSES:
+                logger.warning("Too many consecutive losses")
+                terminated = True
 
-        # Drawdown protection
-        current_bal = self._balance_start + self._episode_pnl
-        if current_bal > self._peak_balance:
-            self._peak_balance = current_bal
-        drawdown = (self._peak_balance - current_bal) / (self._peak_balance + 1e-9)
-        if drawdown > 0.2:  # >20% drawdown จาก peak
-            logger.warning("Max drawdown reached: %.1f%%", drawdown * 100)
-            terminated = True
+            # Drawdown protection (REAL only)
+            current_bal = self._balance_start + self._episode_pnl
+            if current_bal > self._peak_balance:
+                self._peak_balance = current_bal
+            drawdown = (self._peak_balance - current_bal) / (self._peak_balance + 1e-9)
+            if drawdown > 0.2:
+                logger.warning("Max drawdown reached: %.1f%%", drawdown * 100)
+                terminated = True
 
         obs = self._get_observation()
         self._last_obs = obs
@@ -161,28 +187,34 @@ class TradingEnv(gym.Env):
         success, order_id = self.connector.place_trade(
             asset=asset,
             direction=direction,
-            amount=config.TRADE_AMOUNT,
+            amount=self._trade_amount,
             duration_minutes=config.TRADE_DURATION,
         )
         if not success or order_id is None:
-            return self.HOLD_PENALTY, {"action": direction, "pnl": 0.0, "skipped": True}
+            return self.FAIL_PENALTY, {"action": direction, "pnl": 0.0, "skipped": True}
 
         # Notify any external listener (server.py adds to its open-orders book
         # so the dashboard can show a live countdown).
         if self.on_trade_placed:
             try:
-                self.on_trade_placed(order_id, asset, direction, config.TRADE_AMOUNT,
+                self.on_trade_placed(order_id, asset, direction, self._trade_amount,
                                      config.TRADE_DURATION)
             except Exception as exc:
                 logger.debug("on_trade_placed hook error: %s", exc)
 
         wait_seconds = config.TRADE_DURATION * 60 + 5
         logger.info("Trade %s placed on %s — waiting %ds for expiry…", order_id, asset, wait_seconds)
-        time.sleep(wait_seconds)
+        # Interruptible wait: server sets _stop_event on shutdown so we don't
+        # block Ctrl+C for a full minute.
+        self._stop_event.wait(timeout=wait_seconds)
+        if self._stop_event.is_set():
+            logger.info("Trade %s: shutdown during expiry wait — result skipped", order_id)
+            return 0.0, {"action": direction, "pnl": 0.0, "skipped": True}
 
-        # Try official API first (30s), fall back to balance delta if it times out.
+        # OTC binary options rarely return a proper check_win_v3 event —
+        # 10s is enough to catch the rare success; balance delta handles the rest.
         pnl_result = self.connector.get_trade_result(
-            order_id, timeout=30, balance_before=balance_before
+            order_id, timeout=10, balance_before=balance_before
         )
         if self.on_trade_closed:
             try:
@@ -201,29 +233,33 @@ class TradingEnv(gym.Env):
         else:
             self._consecutive_losses = 0
 
-        # ULTRA Reward Shaping:
-        # 1. Base reward: normalized PnL
+        # Binary Options Reward:
+        # base = pnl / stake → +0.80~0.89 (win) or -1.00 (loss)
+        # This exact asymmetry teaches the AI: need >55% win rate to profit
         base_reward = pnl / (config.TRADE_AMOUNT + 1e-9)
 
-        # 2. Sharpe bonus: เพิ่มรางวัลถ้า reward สม่ำเสมอ
+        # Win-rate consistency bonus: reward sustained winning streaks
+        # (replaces Sharpe which is designed for continuous returns, not binary)
         self._reward_history.append(base_reward)
-        sharpe_bonus = 0.0
+        win_bonus = 0.0
         if len(self._reward_history) >= 5:
-            r_arr  = np.array(self._reward_history)
-            sharpe = float(r_arr.mean()) / (float(r_arr.std()) + 1e-9)
-            sharpe_bonus = np.clip(sharpe * 0.1, -0.2, 0.2)
+            r_arr    = np.array(self._reward_history)
+            win_rate = float((r_arr > 0).mean())
+            # Bonus only above break-even (~55%); penalise below
+            win_bonus = np.clip((win_rate - 0.556) * 0.5, -0.10, 0.10)
 
-        # 3. Consistency bonus
-        if pnl > 0 and self._consecutive_losses == 0 and self._trade_count_episode > 3:
-            consistency = 0.05
+        # Streak bonus: reward consistency (3+ consecutive wins)
+        if pnl > 0 and self._consecutive_losses == 0 and self._trade_count_episode >= 3:
+            streak_bonus = 0.05
         else:
-            consistency = 0.0
+            streak_bonus = 0.0
 
-        reward = base_reward + sharpe_bonus + consistency
+        reward = base_reward + win_bonus + streak_bonus
 
+        outcome = "WIN" if pnl > 0 else "LOSS"
         logger.info(
-            "Trade %s: PnL=%.2f base=%.3f sharpe_bonus=%.3f total_reward=%.3f",
-            direction, pnl, base_reward, sharpe_bonus, reward,
+            "Binary %s %s: PnL=%.2f reward=%.3f (base=%.3f win_bonus=%.3f streak=%.2f)",
+            outcome, direction, pnl, reward, base_reward, win_bonus, streak_bonus,
         )
         return reward, {"action": direction, "pnl": pnl, "skipped": False}
 
@@ -243,7 +279,7 @@ class TradingEnv(gym.Env):
             ind_vec = np.zeros(N_INDICATORS, dtype=np.float32)
         ind_vec = ind_vec[:N_INDICATORS]
 
-        chart_vec = self.chart_capture.get_features()
+        chart_vec = self.price_encoder.encode(df)
         if chart_vec is None or len(chart_vec) != N_CHART_FEATURES:
             chart_vec = np.zeros(N_CHART_FEATURES, dtype=np.float32)
 

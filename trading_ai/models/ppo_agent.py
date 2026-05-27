@@ -23,6 +23,7 @@ import torch.optim as optim
 from torch.distributions import Categorical
 
 from trading_ai.config import config
+from trading_ai.models.tft_encoder import ActorCriticV2
 
 logger = logging.getLogger(__name__)
 
@@ -304,6 +305,12 @@ class RolloutBuffer:
         for start in range(0, self.size, batch_size):
             yield indices[start: start + batch_size]
 
+    def get_sequential_batches(self, batch_size: int):
+        """Yield indices in chronological order (required for LSTM/Transformer training)."""
+        indices = torch.arange(self.size)
+        for start in range(0, self.size, batch_size):
+            yield indices[start: start + batch_size]
+
     def reset(self):
         self.ptr  = 0
         self.full = False
@@ -325,13 +332,22 @@ class PPOAgent:
     ENTROPY_END   = 0.003
     ENTROPY_DECAY = 50_000
 
-    def __init__(self, obs_size: int, n_actions: int = 3):
-        self.obs_size  = obs_size
-        self.n_actions = n_actions
-        self.device    = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        logger.info("PPO ULTRA agent — device: %s", self.device)
+    def __init__(self, obs_size: int, n_actions: int = 3, hidden_size: int = 384,
+                 use_v2: Optional[bool] = None):
+        self.obs_size    = obs_size
+        self.n_actions   = n_actions
+        self.hidden_size = hidden_size
+        self.device      = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        self.network   = ActorCritic(obs_size, n_actions).to(self.device)
+        # use_v2=None means "read from config"; explicit bool overrides
+        self._use_v2 = config.USE_V2 if use_v2 is None else use_v2
+
+        if self._use_v2:
+            logger.info("PPO V2 (Semi-Pro TFT+MoE) — device: %s", self.device)
+            self.network = ActorCriticV2(obs_size, n_actions, hidden_size=256).to(self.device)
+        else:
+            logger.info("PPO ULTRA agent — device: %s | hidden: %d", self.device, hidden_size)
+            self.network = ActorCritic(obs_size, n_actions, hidden_size=hidden_size).to(self.device)
         self.optimizer = optim.Adam(
             self.network.parameters(),
             lr=config.LEARNING_RATE,
@@ -402,7 +418,10 @@ class PPOAgent:
             _, last_value = self.network(obs_t)
             last_value = last_value.squeeze().item()
         self.network.train()
-        self.network.reset_hidden()
+        if self._use_v2:
+            self.network.reset_context()
+        else:
+            self.network.reset_hidden()
 
         returns, advantages = self.buffer.compute_returns_and_advantages(
             last_value, config.GAMMA, config.GAE_LAMBDA
@@ -422,7 +441,10 @@ class PPOAgent:
         n_upd = 0
 
         for _ in range(config.PPO_EPOCHS):
-            for idx in self.buffer.get_batches(config.BATCH_SIZE):
+            self.network.reset_context() if self._use_v2 else self.network.reset_hidden()
+            batch_iter = (self.buffer.get_sequential_batches(config.BATCH_SIZE)
+                          if self._use_v2 else self.buffer.get_batches(config.BATCH_SIZE))
+            for idx in batch_iter:
                 obs_b      = all_obs[idx]
                 nxt_b      = all_next_obs[idx]
                 act_b      = all_actions[idx]
@@ -430,8 +452,6 @@ class PPOAgent:
                 adv_b      = advantages[idx]
                 ret_b      = returns[idx]
                 old_val_b  = all_old_values[idx]
-
-                self.network.reset_hidden(obs_b.size(0))
                 new_lp, values, entropy = self.network.evaluate(obs_b, act_b)
 
                 # PPO clipped surrogate
@@ -469,6 +489,7 @@ class PPOAgent:
                 self.icm_optimizer.zero_grad()
                 loss.backward()
                 nn.utils.clip_grad_norm_(self.network.parameters(), config.MAX_GRAD_NORM)
+                nn.utils.clip_grad_norm_(self.icm.parameters(), config.MAX_GRAD_NORM)
                 self.optimizer.step()
                 self.icm_optimizer.step()
 
@@ -487,7 +508,10 @@ class PPOAgent:
         metrics["entropy_coef"] = ent_coef
 
         self.buffer.reset()
-        self.network.reset_hidden()
+        if self._use_v2:
+            self.network.reset_context()
+        else:
+            self.network.reset_hidden()
         self.total_updates += 1
 
         logger.info(
@@ -497,6 +521,28 @@ class PPOAgent:
             metrics["entropy"], metrics["lr"],
         )
         return metrics
+
+    def update_online(self, obs: np.ndarray, action: int, reward: float,
+                      next_obs: np.ndarray, done: bool) -> dict:
+        """
+        Lightweight single-step store+update for NAS shadow challengers.
+        Fills the rollout buffer one step at a time; triggers a full PPO
+        update once the buffer is ready.  Avoids the need for a separate
+        FastLearner instance per challenger.
+        """
+        obs_t = torch.from_numpy(obs.astype(np.float32)).unsqueeze(0).to(self.device)
+        with torch.no_grad():
+            logits, value = self.network(obs_t)
+            dist     = Categorical(logits=logits)
+            log_prob = dist.log_prob(torch.tensor([action], device=self.device))
+        self.store(
+            obs=obs, next_obs=next_obs, action=action,
+            log_prob=float(log_prob.item()), reward=float(reward),
+            value=float(value.squeeze().item()), done=bool(done),
+        )
+        if self.ready_to_update():
+            return self.update(next_obs)
+        return {}
 
     # ── Persistence ────────────────────────────────────────────────────────────
 
@@ -514,18 +560,78 @@ class PPOAgent:
         }, path)
         logger.info("Knowledge saved → %s  (steps=%d)", path, self.total_steps)
 
+    # ── Distributed Worker Support ────────────────────────────────────────────
+
+    def get_weights_bytes(self) -> bytes:
+        """Serialize network weights for sending to worker machines."""
+        import io
+        buf = io.BytesIO()
+        torch.save(self.network.state_dict(), buf)
+        return buf.getvalue()
+
+    def load_weights_bytes(self, data: bytes) -> None:
+        """Load network weights received from a worker machine."""
+        import io
+        buf = io.BytesIO(data)
+        state = torch.load(buf, map_location=self.device, weights_only=True)
+        self.network.load_state_dict(state)
+
+    def fedavg_merge(self, worker_weights_bytes: bytes, alpha: float = 0.25) -> None:
+        """
+        Federated averaging: blend worker-trained weights into this model.
+        alpha=0.25 = 25% worker influence (conservative, preserves server knowledge).
+        """
+        import io
+        buf = io.BytesIO(worker_weights_bytes)
+        worker_state = torch.load(buf, map_location=self.device, weights_only=True)
+        own_state = self.network.state_dict()
+        merged = {
+            k: (1.0 - alpha) * own_state[k].float() + alpha * worker_state[k].float()
+            if k in worker_state else own_state[k]
+            for k in own_state
+        }
+        self.network.load_state_dict(merged)
+        logger.info("FedAvg applied — worker alpha=%.2f", alpha)
+
+    def get_buffer_bytes(self) -> bytes:
+        """Serialize the rollout buffer for sending to workers."""
+        import io, pickle
+        data = {
+            "obs":       self.buffer.obs.numpy(),
+            "next_obs":  self.buffer.next_obs.numpy(),
+            "actions":   self.buffer.actions.numpy(),
+            "log_probs": self.buffer.log_probs.numpy(),
+            "rewards":   self.buffer.rewards.numpy(),
+            "values":    self.buffer.values.numpy(),
+            "dones":     self.buffer.dones.numpy(),
+            "size":      self.buffer.size,
+        }
+        buf = io.BytesIO()
+        pickle.dump(data, buf)
+        return buf.getvalue()
+
     def load(self, path: str) -> bool:
         if not os.path.exists(path):
             logger.info("No checkpoint at %s – starting fresh", path)
             return False
         try:
             ckpt = torch.load(path, map_location=self.device, weights_only=False)
-            self.network.load_state_dict(ckpt["network_state"])
+            try:
+                self.network.load_state_dict(ckpt["network_state"])
+            except RuntimeError:
+                # Architecture changed (e.g. V1→V2 upgrade) — old weights are
+                # incompatible. Back up the file and start fresh so the next
+                # save() will write a clean V2 checkpoint.
+                bak = path + ".v1.bak"
+                os.replace(path, bak)
+                logger.info(
+                    "Checkpoint architecture mismatch (V1→V2 upgrade). "
+                    "Old weights backed up to %s — starting fresh with V2.", bak
+                )
+                return False
             self.optimizer.load_state_dict(ckpt["optimizer_state"])
             if "scheduler_state" in ckpt:
                 self.scheduler.load_state_dict(ckpt["scheduler_state"])
-            if "icm_state" in ckpt:
-                self.icm.load_state_dict(ckpt["icm_state"])
             self.total_steps       = ckpt.get("total_steps", 0)
             self.total_updates     = ckpt.get("total_updates", 0)
             self.total_episodes    = ckpt.get("total_episodes", 0)
