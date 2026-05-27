@@ -12,6 +12,13 @@ const OTC_ASSETS = [
   'EUR/CAD (OTC)',
   'EUR/JPY (OTC)',
 ];
+const FOREX_ASSETS = [
+  'EUR/USD',
+  'GBP/USD',
+  'EUR/CAD',
+  'EUR/JPY',
+];
+const ALL_ASSETS = [...OTC_ASSETS, ...FOREX_ASSETS];
 
 // ── State ─────────────────────────────────────────────────────────────────────
 const state = {
@@ -1189,9 +1196,9 @@ function formatPrice(asset, price) {
 
 // ── Boot ──────────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
-  // Init chart instances (defined in charts.js)
+  // Init chart instances for all assets (OTC + Forex)
   window.charts = {};
-  OTC_ASSETS.forEach(asset => {
+  ALL_ASSETS.forEach(asset => {
     const container = document.querySelector(
       `[data-asset="${CSS.escape(asset)}"] .chart-container`
     );

@@ -2130,7 +2130,7 @@ def _ai_loop():
         # opportunity (highest confidence non-HOLD signal).  Falls back to
         # config.ASSET if nothing else is available.
         candidates = []   # list of (display_name, api_name, signal, obs, ppo_action)
-        for display_name in OTC_ASSETS:
+        for display_name in ALL_ASSETS:
             api_name = _resolved_asset_names.get(display_name)
             if not api_name:
                 continue
@@ -2149,6 +2149,8 @@ def _ai_loop():
             indicator_vec = asset_obs[:N_INDICATORS]
             ppo_action, log_prob, value = _agent.select_action(asset_obs)
             _, ppo_conf = _agent.get_confidence(asset_obs)
+            # Switch brain mode: OTC = pattern-only, Forex = full 8-layer fusion
+            _brain.set_market_mode("OTC" if is_otc_asset(display_name) else "FOREX")
             # Pass raw candles so brain can do pattern-memory lookup
             signal = _brain.think(indicator_vec, ppo_action, ppo_conf,
                                   candles=getattr(_env, "_last_candles", None))
@@ -2174,6 +2176,7 @@ def _ai_loop():
             broadcast_sync({
                 "type":       "signal",
                 "asset":      display_name,
+                "asset_type": "OTC" if is_otc_asset(display_name) else "FOREX",
                 "action":     {0:"HOLD",1:"BUY",2:"SELL"}[final_action],
                 "confidence": round(signal.confidence, 3),
                 "risk":       round(signal.risk_multiplier, 2),
@@ -2436,21 +2439,47 @@ OTC_ASSETS = [
     "EUR/JPY (OTC)",
 ]
 
-# IQ Option API names for OTC assets – tries each in order until one works.
+# Regular Forex binary options — real market prices, news/calendar apply.
+# Available weekdays during market hours; practice account uses them 24/7.
+FOREX_ASSETS = [
+    "EUR/USD", "GBP/USD", "EUR/CAD", "EUR/JPY",
+]
+
+ALL_ASSETS = OTC_ASSETS + FOREX_ASSETS
+
+
+def is_otc_asset(display_name: str) -> bool:
+    """True for OTC (synthetic), False for real-market Forex."""
+    return "(OTC)" in display_name
+
+# IQ Option API name candidates — tries each in order until one works.
 OTC_ASSET_MAP: Dict[str, List[str]] = {
     "EUR/USD (OTC)": ["EURUSD-OTC", "EURUSD_otc", "frxEURUSD", "EURUSD"],
     "GBP/USD (OTC)": ["GBPUSD-OTC", "GBPUSD_otc", "frxGBPUSD", "GBPUSD"],
     "EUR/JPY (OTC)": ["EURJPY-OTC", "EURJPY_otc", "frxEURJPY", "EURJPY"],
     "EUR/CAD (OTC)": ["EURCAD-OTC", "EURCAD_otc", "frxEURCAD", "EURCAD"],
 }
+FOREX_ASSET_MAP: Dict[str, List[str]] = {
+    "EUR/USD": ["EURUSD", "frxEURUSD"],
+    "GBP/USD": ["GBPUSD", "frxGBPUSD"],
+    "EUR/CAD": ["EURCAD", "frxEURCAD"],
+    "EUR/JPY": ["EURJPY", "frxEURJPY"],
+}
+# Combined lookup used by _resolve_asset_name()
+ASSET_CANDIDATE_MAP: Dict[str, List[str]] = {**OTC_ASSET_MAP, **FOREX_ASSET_MAP}
 
 # Sanity-check price ranges per asset.  Prices outside these bounds mean
 # iqoptionapi returned data for the WRONG pair (shared-state race condition).
 PRICE_RANGES: Dict[str, tuple] = {
     "EUR/USD (OTC)": (0.90, 1.45),
     "GBP/USD (OTC)": (1.10, 1.75),
-    "EUR/JPY (OTC)": (130.0, 200.0),   # EUR/JPY is ~184 in 2025-2026
-    "EUR/CAD (OTC)": (1.40, 1.70),     # EUR/CAD is ~1.56 in 2026
+    "EUR/JPY (OTC)": (130.0, 200.0),
+    "EUR/CAD (OTC)": (1.40, 1.70),
+    # Real Forex — same ranges
+    "EUR/USD": (0.90, 1.45),
+    "GBP/USD": (1.10, 1.75),
+    "EUR/JPY": (130.0, 200.0),
+    "EUR/CAD": (1.40, 1.70),
 }
 
 # Cache: display_name → resolved api_name (once found, reuse)
@@ -2461,7 +2490,7 @@ _resolve_failed_at: Dict[str, float] = {}
 _RESOLVE_RETRY_SECS = 600   # re-try failed assets after 10 minutes
 
 # Cache: display_name → list of {time,open,high,low,close} for chart history
-_candle_history: Dict[str, List[Dict]] = {a: [] for a in OTC_ASSETS}
+_candle_history: Dict[str, List[Dict]] = {a: [] for a in ALL_ASSETS}
 
 
 @contextlib.contextmanager
@@ -2495,7 +2524,7 @@ def _resolve_asset_name(display_name: str) -> Optional[str]:
     lo, hi = PRICE_RANGES.get(display_name, (0.0, 1e9))
 
     tried = []
-    for api_name in OTC_ASSET_MAP.get(display_name, []):
+    for api_name in ASSET_CANDIDATE_MAP.get(display_name, []):
         try:
             with _suppress_iqapi_stdout():
                 df = _connector.get_candles(asset=api_name, timeframe_seconds=60, count=5)
@@ -2522,8 +2551,8 @@ def _resolve_asset_name(display_name: str) -> Optional[str]:
 
 
 def _fetch_initial_candles():
-    """Fetch the last 100 candles for each OTC asset (30-second timeframe)."""
-    for display_name in OTC_ASSETS:
+    """Fetch the last 100 candles for each asset (30-second timeframe)."""
+    for display_name in ALL_ASSETS:
         api_name = _resolve_asset_name(display_name)
         if not api_name:
             continue
@@ -2665,24 +2694,25 @@ def _init_components():
     broadcast_sync({"type": "capital_guard", **_capital_guard.status()})
     broadcast_sync({"type":"status","message":"✅ พร้อมแล้ว – กด START AI","level":"success"})
 
-    # Fetch initial OTC candle history (30-second candles from IQ Option)
-    broadcast_sync({"type":"status","message":"📊 โหลดประวัติกราฟ OTC…","level":"info"})
+    # Fetch initial candle history for all assets (30-second candles from IQ Option)
+    broadcast_sync({"type":"status","message":"📊 โหลดประวัติกราฟ OTC + Forex…","level":"info"})
     _fetch_initial_candles()
     broadcast_sync({"type":"candle_history","data":_candle_history})
 
     # Update checks with live asset resolution results
     live_results = list(_check_results)
-    for display_name in OTC_ASSETS:
+    for display_name in ALL_ASSETS:
         api_name = _resolved_asset_names.get(display_name)
+        asset_label = "OTC" if is_otc_asset(display_name) else "Forex"
         if api_name:
             live_results.append({
-                "name": f"เชื่อมต่อ {display_name}",
+                "name": f"เชื่อมต่อ {display_name} [{asset_label}]",
                 "passed": True,
                 "message": f"→ {api_name}",
             })
         else:
             live_results.append({
-                "name": f"เชื่อมต่อ {display_name}",
+                "name": f"เชื่อมต่อ {display_name} [{asset_label}]",
                 "passed": False,
                 "message": "ไม่พบ asset นี้ใน IQ Option — ลองใหม่อีกครั้ง",
             })
@@ -2696,13 +2726,13 @@ def _init_components():
 
 def _price_loop():
     """
-    Continuously fetch IQ Option OTC candles and broadcast live price updates.
-    Uses 30-second candles (half-minute) for better granularity.
-    Resolves the correct IQ Option API name for each OTC asset automatically.
+    Continuously fetch IQ Option candles for OTC and Forex assets and broadcast
+    live price updates.  Uses 30-second candles for better granularity.
+    Resolves the correct IQ Option API name for each asset automatically.
     """
     tick = 0
     while _ai_running:
-        for display_name in OTC_ASSETS:
+        for display_name in ALL_ASSETS:
             api_name = _resolve_asset_name(display_name)
             if not api_name:
                 continue
@@ -2747,6 +2777,7 @@ def _price_loop():
                 broadcast_sync({
                     "type":       "price",
                     "asset":      display_name,
+                    "asset_type": "OTC" if is_otc_asset(display_name) else "FOREX",
                     "api_name":   api_name,
                     "price":      round(cur_close, 5),
                     "change_pct": round(change_pct, 4),

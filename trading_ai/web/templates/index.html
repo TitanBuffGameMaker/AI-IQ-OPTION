@@ -168,18 +168,23 @@
 <!-- ════════════════════════ MAIN AREA ═════════════════════════ -->
 <div id="main">
 
-  <!-- ─── 4-Chart Grid ──────────────────────────────────────── -->
-  <div id="chart-grid">
+  <!-- ─── Asset Charts: OTC + Forex ─────────────────────────── -->
 
-    {% set assets = [
+  <!-- OTC Group -->
+  <div class="asset-group-label">
+    <span class="otc-badge">OTC</span>
+    <span>หุ้นสังเคราะห์ IQ Option — เรียนรู้จาก Pattern เท่านั้น</span>
+  </div>
+  <div id="chart-grid">
+    {% set otc_assets = [
       'EUR/USD (OTC)',
       'GBP/USD (OTC)',
       'EUR/CAD (OTC)',
       'EUR/JPY (OTC)'
     ] %}
 
-    {% for asset in assets %}
-    <div class="chart-card" data-asset="{{ asset }}">
+    {% for asset in otc_assets %}
+    <div class="chart-card" data-asset="{{ asset }}" data-asset-type="OTC">
 
       <!-- Header -->
       <div class="card-header">
@@ -220,8 +225,64 @@
 
     </div>
     {% endfor %}
+  </div><!-- /#chart-grid OTC -->
 
-  </div><!-- /#chart-grid -->
+  <!-- Forex Group -->
+  <div class="asset-group-label" style="margin-top:18px;">
+    <span class="forex-badge">FOREX</span>
+    <span>ตลาดจริง — ใช้ข่าว + เทคนิค + ปฏิทินเศรษฐกิจ</span>
+  </div>
+  <div id="chart-grid-forex" class="chart-grid">
+    {% set forex_assets = [
+      'EUR/USD',
+      'GBP/USD',
+      'EUR/CAD',
+      'EUR/JPY'
+    ] %}
+
+    {% for asset in forex_assets %}
+    <div class="chart-card" data-asset="{{ asset }}" data-asset-type="FOREX">
+
+      <!-- Header -->
+      <div class="card-header">
+        <span class="forex-badge">FOREX</span>
+        <span class="asset-name">{{ asset }}</span>
+        <span class="signal-tag">── HOLD</span>
+      </div>
+
+      <!-- Price -->
+      <div class="price-row">
+        <span class="price-val" data-prev="0">─.─────</span>
+        <span class="price-change">+0.000%</span>
+      </div>
+
+      <!-- Lightweight Chart -->
+      <div class="chart-container"></div>
+
+      <!-- Confidence bar -->
+      <div class="confidence-row">
+        <span class="conf-label">AI confidence</span>
+        <div class="conf-track">
+          <div class="conf-fill" style="width:0%"></div>
+        </div>
+        <span class="conf-pct">0%</span>
+      </div>
+
+      <!-- BUY / SELL buttons -->
+      <div class="btn-row">
+        <button class="btn-trade btn-buy" disabled
+                onclick="manualTrade('{{ asset }}', 'call')">
+          <span class="arrow">▲</span> BUY  ขึ้น
+        </button>
+        <button class="btn-trade btn-sell" disabled
+                onclick="manualTrade('{{ asset }}', 'put')">
+          <span class="arrow">▼</span> SELL  ลง
+        </button>
+      </div>
+
+    </div>
+    {% endfor %}
+  </div><!-- /#chart-grid-forex -->
 
   <!-- ─── Right Sidebar ─────────────────────────────────────── -->
   <aside id="sidebar">

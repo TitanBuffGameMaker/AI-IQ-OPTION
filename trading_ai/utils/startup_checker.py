@@ -2,7 +2,7 @@
 IQ Option Startup Verification Module
 
 ตรวจสอบ 3 เงื่อนไขก่อนให้ AI เริ่มเทรด:
-  1. ชื่อหุ้นทั้ง 4 กราฟ ต้องเป็น OTC
+  1. ชื่อหุ้นทั้ง 4 กราฟ ต้องเป็น OTC หรือ Forex ที่รองรับ
   2. กรอบเวลาแท่งเทียน = 30 นาที
   3. ระยะเวลาออเดอร์ = 1 นาที
 
@@ -34,6 +34,23 @@ VALID_OTC_ASSETS = [
     "USD/CHF (OTC)",
     "AUD/JPY (OTC)",
 ]
+
+# ── ชื่อหุ้น Forex ปกติ (ตลาดจริง) ที่รองรับ ─────────────────────────────────
+VALID_FOREX_ASSETS = [
+    "EUR/USD",
+    "GBP/USD",
+    "EUR/CAD",
+    "EUR/JPY",
+    "GBP/JPY",
+    "USD/JPY",
+    "NZD/USD",
+    "EUR/GBP",
+    "USD/CHF",
+    "AUD/JPY",
+]
+
+# All valid assets (OTC + Forex)
+VALID_ALL_ASSETS = VALID_OTC_ASSETS + VALID_FOREX_ASSETS
 
 # ── Expected settings ────────────────────────────────────────────────────────
 REQUIRED_TIMEFRAME_MIN = 30   # กรอบเวลาแท่งเทียน = 30 นาที
@@ -333,13 +350,17 @@ class StartupChecker:
 
     @staticmethod
     def _find_otc_asset(text: str) -> Optional[str]:
+        """Returns matching asset name if text contains a valid OTC or Forex asset."""
         if not text:
             return None
         text_upper = text.upper().replace(" ", "")
-        for asset in VALID_OTC_ASSETS:
+        for asset in VALID_ALL_ASSETS:
             key = asset.upper().replace(" ", "")
-            if key in text_upper or "OTC" in text_upper:
+            if key in text_upper:
                 return asset
+        # Fallback: any OTC marker
+        if "OTC" in text_upper:
+            return VALID_OTC_ASSETS[0]
         return None
 
     @staticmethod

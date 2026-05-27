@@ -1508,3 +1508,37 @@ body {
   border-left: 2px solid var(--purple);
   padding-left: 6px;
 }
+
+/* ── Dual-Asset Mode: OTC + Forex ───────────────────────────── */
+.forex-badge {
+  padding: 2px 7px;
+  background: #1565c0;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 700;
+  color: #fff;
+  letter-spacing: .5px;
+}
+
+.asset-group-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  font-size: 11px;
+  color: var(--text-muted);
+  font-weight: 600;
+  letter-spacing: .3px;
+}
+
+.chart-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  padding: 4px 8px 8px;
+}
+
+@media (max-width: 900px) {
+  .chart-grid { grid-template-columns: 1fr; }
+  #chart-grid-forex { grid-template-columns: 1fr; }
+}
