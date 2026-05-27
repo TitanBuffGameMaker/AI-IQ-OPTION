@@ -73,6 +73,10 @@ _worker_names:  Dict[str, str]    = {}          # worker_id → machine name
 _worker_lock    = threading.Lock()              # guards _worker_results dict
 _worker_knowledge_count: int = 0                # total knowledge nodes received from workers
 
+# ── Per-asset & hourly win-rate tracking ─────────────────────────────────────
+_asset_stats:  Dict[str, dict] = {}   # api_name → {wins, trades, pnl}
+_hourly_stats: Dict[int, dict] = {}   # hour 0-23 → {wins, trades}
+
 # ── Live-log broadcast ─────────────────────────────────────────────────────────
 _log_buffer: deque = deque(maxlen=300)   # last 300 log lines for new-client catch-up
 _log_broadcasting = False                # re-entrancy guard for the WS handler
@@ -1379,6 +1383,14 @@ async def _lifespan(application):
             except Exception:
                 pass
 
+        # Save PPO checkpoint before shutdown so learning survives restart.
+        if _knowledge and _agent:
+            try:
+                _knowledge.save_brain(_agent)
+                logger.info("PPO checkpoint saved on shutdown.")
+            except Exception as _ce:
+                logger.debug("Checkpoint save on shutdown failed: %s", _ce)
+
         # Brain shutdown: save knowledge graph — give it 5 s max.
         if _brain:
             def _shutdown_brain():
@@ -2184,14 +2196,34 @@ def _ai_loop():
                 time.sleep(10)
                 continue
 
-        # Dynamic min-confidence via CapitalGuard
-        # PRACTICE: 0.30 → 0.40 → 0.50 (เรียนรู้ได้มาก)
-        # REAL:     0.55 → 0.58 → 0.62 → 0.65 (รอสัญญาณมั่นใจเท่านั้น)
-        confirmed = _trade_stats.get("trades", 0)
+        # Dynamic min-confidence — payout-aware + time-of-day adjusted
+        confirmed  = _trade_stats.get("trades", 0)
+        # Best-payout asset in candidates for threshold calculation
+        _best_pay  = max(
+            (_connector.get_payout(c["api"]) / 100.0 for c in candidates if c["api"]),
+            default=0.85,
+        )
         if _capital_guard:
-            min_conf = _capital_guard.min_confidence(confirmed)
+            import numpy as _np2
+            min_conf = _capital_guard.min_confidence_for_payout(confirmed, _best_pay)
         else:
-            min_conf = 0.30 if confirmed < 20 else (0.40 if confirmed < 50 else 0.50)
+            _bev = 1.0 / (1.0 + _best_pay)
+            min_conf = max(0.30 if confirmed < 20 else (0.40 if confirmed < 50 else 0.50),
+                           _bev + 0.06)
+
+        # Time-of-day quality boost: raise bar during historically bad hours
+        _tod_hour = int(time.strftime("%H"))
+        _h_stat   = _hourly_stats.get(_tod_hour, {})
+        _h_trades = _h_stat.get("trades", 0)
+        if _h_trades >= 20:
+            _h_wr   = _h_stat["wins"] / _h_trades
+            _h_bev  = 1.0 / (1.0 + _best_pay)
+            if _h_wr < _h_bev - 0.04:                           # historically bad hour
+                min_conf = min(0.90, min_conf + 0.07)
+                logger.debug("Time-of-day penalty hour=%d wr=%.1f%% min_conf→%.2f",
+                             _tod_hour, _h_wr * 100, min_conf)
+            elif _h_wr > _h_bev + 0.08 and _h_trades >= 30:     # historically good hour
+                min_conf = max(0.25, min_conf - 0.03)
 
         # Apply fear's extra confidence requirement (REAL mode only)
         if _brain:
@@ -2199,9 +2231,22 @@ def _ai_loop():
             if fear_boost > 0:
                 min_conf = min(0.92, min_conf + fear_boost)
 
-        # Pick best non-HOLD signal across all assets
+        # Pick best non-HOLD signal — also gate on per-asset expected value.
+        # After 40+ trades on an asset, if EV is clearly negative skip it.
+        def _ev_ok(c: dict) -> bool:
+            st = _asset_stats.get(c["api"], {})
+            n  = st.get("trades", 0)
+            if n < 40:
+                return True  # not enough data — allow learning
+            wr  = st["wins"] / n
+            pay = _connector.get_payout(c["api"]) / 100.0
+            ev  = wr * pay - (1.0 - wr)
+            return ev > -0.12   # skip if EV clearly negative (-12% edge)
+
         tradeable = [c for c in candidates
-                     if c["final"] != 0 and c["signal"].confidence >= min_conf]
+                     if c["final"] != 0
+                     and c["signal"].confidence >= min_conf
+                     and _ev_ok(c)]
         if tradeable:
             tradeable.sort(key=lambda c: c["signal"].confidence, reverse=True)
             best = tradeable[0]
@@ -2255,6 +2300,20 @@ def _ai_loop():
                     _trade_stats["wins"] += 1
                 _trade_stats["pnl"] += pnl
 
+            # Per-asset + hourly win-rate tracking
+            if api_name not in _asset_stats:
+                _asset_stats[api_name] = {"wins": 0, "trades": 0, "pnl": 0.0}
+            _asset_stats[api_name]["trades"] += 1
+            _asset_stats[api_name]["pnl"]    += pnl
+            if pnl > 0:
+                _asset_stats[api_name]["wins"] += 1
+            _cur_hour = int(time.strftime("%H"))
+            if _cur_hour not in _hourly_stats:
+                _hourly_stats[_cur_hour] = {"wins": 0, "trades": 0}
+            _hourly_stats[_cur_hour]["trades"] += 1
+            if pnl > 0:
+                _hourly_stats[_cur_hour]["wins"] += 1
+
             # ── Capital Guard: record PnL + broadcast status ───────────────
             if _capital_guard:
                 _capital_guard.record_trade_pnl(pnl)
@@ -2275,6 +2334,17 @@ def _ai_loop():
             }
             _trade_history.append(entry)
             _save_trade_stats()
+
+            # Periodic brain.pt save — every 20 trades so learning survives restarts.
+            # (PPO update only saves every 128 steps; without this, all learning is
+            # lost if the session ends before accumulating that many steps.)
+            if _knowledge and _agent and _trade_stats["trades"] % 20 == 0:
+                try:
+                    _knowledge.save_brain(_agent)
+                    logger.debug("Periodic brain checkpoint saved (%d trades)",
+                                 _trade_stats["trades"])
+                except Exception as _ckpt_e:
+                    logger.debug("Periodic checkpoint save error: %s", _ckpt_e)
 
             wr = _trade_stats["wins"] / max(_trade_stats["trades"], 1)
             broadcast_sync({

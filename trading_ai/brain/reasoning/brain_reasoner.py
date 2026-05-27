@@ -29,6 +29,59 @@ from trading_ai.brain.internet.economic_calendar import EconomicCalendar
 logger = logging.getLogger(__name__)
 
 
+class LayerWeightAdapter:
+    """
+    Self-tuning layer weights: tracks per-layer win accuracy per regime,
+    then nudges multipliers so proven layers get more influence.
+
+    Replaces the hard-coded 2.5 / 1.2 / 0.8 constants with values the
+    brain learns from its own trade history.  Starts at the same defaults
+    so early behaviour is unchanged.
+    """
+    ALPHA = 0.08   # EMA learning rate (lower = more stable)
+    MIN_W = 0.30
+    MAX_W = 4.00
+
+    _DEFAULTS: Dict[str, Dict[str, float]] = {
+        "trending": {"ppo": 2.5, "kg": 1.2, "cs": 0.8,  "strategy": 2.0, "mtf": 1.0, "ep": 1.0},
+        "ranging":  {"ppo": 1.8, "kg": 1.5, "cs": 1.2,  "strategy": 2.0, "mtf": 0.8, "ep": 1.0},
+        "volatile": {"ppo": 1.5, "kg": 0.8, "cs": 0.5,  "strategy": 1.5, "mtf": 0.5, "ep": 0.8},
+    }
+
+    def __init__(self):
+        import copy
+        self._w:       Dict[str, Dict[str, float]] = copy.deepcopy(self._DEFAULTS)
+        self._correct: Dict[str, Dict[str, float]] = defaultdict(lambda: defaultdict(float))
+        self._total:   Dict[str, Dict[str, float]] = defaultdict(lambda: defaultdict(float))
+
+    def get(self, regime: str, layer: str) -> float:
+        return self._w.get(regime, self._w["trending"]).get(layer, 1.0)
+
+    def update(self, regime: str, layer_votes: Dict[str, int],
+               final_action: int, won: bool) -> None:
+        """Record whether each layer agreed with the winning action."""
+        for layer, vote in layer_votes.items():
+            if vote == 0:
+                continue  # HOLD vote — not informative
+            self._total[regime][layer]   = self._total[regime][layer]   * 0.96 + 1.0
+            correct = (vote == final_action and won)
+            self._correct[regime][layer] = self._correct[regime][layer] * 0.96 + float(correct)
+
+            total = self._total[regime][layer]
+            if total < 5:
+                continue
+            acc     = self._correct[regime][layer] / total
+            default = self._DEFAULTS.get(regime, self._DEFAULTS["trending"]).get(layer, 1.0)
+            # accuracy 0.50 → ×1.0 default; 0.65 → ×1.30; 0.35 → ×0.70
+            scale   = 1.0 + (acc - 0.50) * 2.0
+            target  = float(np.clip(default * scale, self.MIN_W, self.MAX_W))
+            self._w[regime][layer] += self.ALPHA * (target - self._w[regime][layer])
+
+    def summary(self, regime: str) -> str:
+        w = self._w.get(regime, {})
+        return ", ".join(f"{k}={v:.2f}" for k, v in sorted(w.items()))
+
+
 @dataclass
 class BrainSignal:
     action:          int           # 0=hold 1=buy 2=sell
@@ -117,6 +170,9 @@ class BrainReasoner:
         self._signal_history:  deque = deque(maxlen=5)
         self._pnl_history:     deque = deque(maxlen=20)
         self._market_mode = "OTC"   # set via set_market_mode()
+        self.weight_adapter = LayerWeightAdapter()
+        self._last_layer_votes: Dict[str, int] = {}
+        self._last_regime = "trending"
 
     # ── Main: think ────────────────────────────────────────────────────────────
 
@@ -195,30 +251,23 @@ class BrainReasoner:
             mtf_sell = 0.8
             reasoning.append("MTF: 5-min downtrend → SELL bias")
 
-        # ── Regime-adaptive weights ─────────────────────────────────────────
-        if regime == "trending":
-            ppo_weight   = 2.5
-            kg_weight    = 1.2
-            cs_weight    = 0.8
-            hold_penalty = 0.0
-        elif regime == "ranging":
-            ppo_weight   = 1.8
-            kg_weight    = 1.5
-            cs_weight    = 1.2
-            hold_penalty = 0.0
-        else:  # volatile
-            ppo_weight   = 1.5
-            kg_weight    = 0.8
-            cs_weight    = 0.5
-            hold_penalty = 0.3
+        # ── Adaptive regime weights ──────────────────────────────────────────
+        ppo_weight   = self.weight_adapter.get(regime, "ppo")
+        kg_weight    = self.weight_adapter.get(regime, "kg")
+        cs_weight    = self.weight_adapter.get(regime, "cs")
+        strat_weight = self.weight_adapter.get(regime, "strategy")
+        mtf_weight   = self.weight_adapter.get(regime, "mtf")
+        ep_weight    = self.weight_adapter.get(regime, "ep")
+        hold_penalty = 0.3 if regime == "volatile" else 0.0
+        if regime == "volatile":
             reasoning.append("Volatile market: extra caution")
 
         # ── Aggregate scores ────────────────────────────────────────────────
-        buy_score  = (kg_buy * kg_weight + ep_buy + cs_buy * cs_weight +
-                      news_buy + pattern_buy + mtf_buy +
+        buy_score  = (kg_buy * kg_weight + ep_buy * ep_weight + cs_buy * cs_weight +
+                      news_buy + pattern_buy + mtf_buy * mtf_weight +
                       perf_boost * (1 if ppo_action == 1 else 0))
-        sell_score = (kg_sell * kg_weight + ep_sell + cs_sell * cs_weight +
-                      news_sell + pattern_sell + mtf_sell +
+        sell_score = (kg_sell * kg_weight + ep_sell * ep_weight + cs_sell * cs_weight +
+                      news_sell + pattern_sell + mtf_sell * mtf_weight +
                       perf_boost * (1 if ppo_action == 2 else 0))
         hold_score = kg_hold + news_hold + hold_penalty + pattern_hold
 
@@ -230,12 +279,11 @@ class BrainReasoner:
         elif ppo_action == 2:
             sell_score += ppo_confidence * ppo_weight
 
-        # ── Strategy signal boost (weight = 2.0) ────────────────────────────
+        # ── Strategy signal boost ────────────────────────────────────────────
         strat_dir = 0
         if strategy_signal is not None:
             strat_action, strat_conf = strategy_signal
             strat_dir = strat_action
-            strat_weight = 2.0
             if strat_action == 1:
                 buy_score  += strat_conf * strat_weight
                 reasoning.append(f"Strategy: {strategy_name or 'Strategy'} → BUY ({strat_conf:.2f})")
@@ -307,6 +355,20 @@ class BrainReasoner:
 
         # ── Confidence calibration ──────────────────────────────────────────
         final_conf = self._calibrate_confidence(final_conf, regime, ppo_confidence)
+
+        # Store per-layer votes for adaptive weight update after trade outcome
+        kg_vote  = 1 if kg_buy > kg_sell + 0.05 else (2 if kg_sell > kg_buy + 0.05 else 0)
+        ep_vote  = 1 if ep_buy > ep_sell + 0.02 else (2 if ep_sell > ep_buy + 0.02 else 0)
+        cs_vote  = 1 if cs_buy > cs_sell + 0.05 else (2 if cs_sell > cs_buy + 0.05 else 0)
+        self._last_layer_votes = {
+            "ppo":      ppo_action,
+            "strategy": strat_dir,
+            "mtf":      1 if mtf_trend > 0 else (2 if mtf_trend < 0 else 0),
+            "kg":       kg_vote,
+            "ep":       ep_vote,
+            "cs":       cs_vote,
+        }
+        self._last_regime = regime
 
         signal = BrainSignal(
             action=final_action,
@@ -395,6 +457,13 @@ class BrainReasoner:
         )
 
         self._pnl_history.append(pnl)
+
+        # Adaptive layer weight update
+        if self._last_layer_votes:
+            self.weight_adapter.update(
+                self._last_regime, self._last_layer_votes, action_taken, won
+            )
+
         self.graph.tick()
         self.graph.save()
 

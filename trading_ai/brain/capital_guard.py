@@ -19,6 +19,8 @@ import logging
 import time
 from typing import Tuple
 
+import numpy as np
+
 logger = logging.getLogger(__name__)
 
 
@@ -203,6 +205,26 @@ class CapitalGuard:
             if trades_done >= min_trades:
                 threshold = conf
         return threshold
+
+    def min_confidence_for_payout(self, trades_done: int, payout: float = 0.85) -> float:
+        """
+        Like min_confidence() but also considers the asset's actual payout.
+
+        For binary options:  break_even_WR = 1 / (1 + payout)
+          payout 0.80 → need > 55.6% WR
+          payout 0.86 → need > 53.8% WR
+
+        We add a 6% safety margin above break-even so the threshold
+        is always slightly tighter than the theoretical minimum.
+        The result is clipped to [base_threshold + 0.01, 0.90].
+        """
+        base = self.min_confidence(trades_done)
+        if payout <= 0:
+            return base
+        breakeven_wr  = 1.0 / (1.0 + float(payout))
+        safety_margin = 0.06
+        payout_floor  = float(np.clip(breakeven_wr + safety_margin, 0.30, 0.90))
+        return max(base, payout_floor)
 
     # ── Status for UI ─────────────────────────────────────────────────────────
 
